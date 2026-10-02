@@ -15,17 +15,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::config;
-use rust_reality_client::handoff::{FIRST_BYTE_BUDGET, Handoff};
+use rust_reality_client::handoff::{Established, FIRST_BYTE_BUDGET, Handoff};
 use rust_reality_client::protocol::reality::{
     AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
     X25519_MLKEM768_GROUP, build_client_hello, complete,
 };
 use rust_reality_client::protocol::vless::Destination;
 use rust_reality_client::transport::{
-    AddressFamily, Dial, DialPolicy, Environment, Tuning, VisionSession,
+    AddressFamily, Dial, DialPolicy, Environment, Transferred, Tuning, VisionSession, carry,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 /// The three TLS 1.3 suites this client offers.
@@ -316,6 +316,84 @@ async fn half_close_reaches_the_destination_and_ends_the_tunnel() {
     );
     if let Some(error) = session.failure() {
         panic!("an orderly close is not a failure: {error}");
+    }
+}
+
+/// The relay over a real tunnel, including the half-close contract.
+///
+/// This is the production shape: [`establish`](Handoff::establish) on one side of
+/// an application socket, a [`VisionSession`] on the other, and nothing between
+/// them but [`carry`](rust_reality_client::transport::carry). The application
+/// finishes sending first, which must reach the echo as an EOF *and* must not stop
+/// the reply from coming back — the two properties the relay exists for, now
+/// proven against the node's own close handling rather than against a socket of
+/// our own making.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn the_relay_carries_and_half_closes_through_v201() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let handoff = Handoff::new(configured_node(), dial);
+    let (destination, port) = echo_target();
+    let Established { session, .. } =
+        tokio::time::timeout(READ_TIMEOUT * 3, handoff.establish(&destination, port))
+            .await
+            .expect("establishment must finish inside the budget")
+            .unwrap_or_else(|error| panic!("establishment through v2.0.1 failed: {error}"));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener for the application");
+    let address = listener.local_addr().expect("local address");
+    let mut app = TcpStream::connect(address)
+        .await
+        .unwrap_or_else(|error| panic!("connecting to the relay at {address}: {error}"));
+    let (mut local, _) = listener.accept().await.expect("accept the application");
+
+    let payload: Vec<u8> = (0..=250_u8)
+        .collect::<Vec<_>>()
+        .iter()
+        .copied()
+        .cycle()
+        .take(40 * 1024)
+        .collect();
+    let moved = u64::try_from(payload.len()).expect("a test payload fits a u64");
+
+    let relay = tokio::spawn(async move {
+        let mut session = session;
+        let counts = carry(&mut local, &mut session)
+            .await
+            .expect("the relay must end without an i/o error");
+        (counts, session.failure())
+    });
+
+    app.write_all(&payload).await.expect("upload");
+    app.shutdown()
+        .await
+        .expect("half-close the application side");
+    let mut echoed = Vec::new();
+    tokio::time::timeout(READ_TIMEOUT * 2, app.read_to_end(&mut echoed))
+        .await
+        .expect("the echo must return inside the budget")
+        .expect("drain the application socket");
+    assert_eq!(
+        echoed, payload,
+        "the relay altered, dropped or reordered bytes across the tunnel"
+    );
+
+    let (counts, learned) = relay.await.expect("the relay task finishes");
+    assert_eq!(
+        counts,
+        Transferred {
+            to_remote: moved,
+            to_local: moved,
+        },
+        "and counted each direction as its own"
+    );
+    if let Some(error) = learned {
+        panic!("the relay reported a failure it survived: {error}");
     }
 }
 
