@@ -6,7 +6,7 @@
 //! they need the server, and the server needs a TLS 1.3 cover:
 //!
 //! ```text
-//! scripts/interop/upstream-server.sh          # starts cover + v2.0.1 entry
+//! scripts/interop/upstream-server.sh          # starts cover + echo + v2.0.1 entry
 //! set -a; . target/interop/handoff.env; set +a
 //! cargo test --test interop_v201 -- --ignored --test-threads=1
 //! ```
@@ -15,10 +15,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::protocol::reality::{
-    AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, X25519_GROUP, X25519_MLKEM768_GROUP,
-    build_client_hello, complete,
+    AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
+    X25519_MLKEM768_GROUP, build_client_hello, complete,
 };
-use tokio::io::AsyncWriteExt as _;
+use rust_reality_client::protocol::vless::Destination;
+use rust_reality_client::transport::VisionSession;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -69,8 +71,32 @@ fn now_seconds() -> u32 {
     .expect("clock fits a u32 for another billion years")
 }
 
-/// Performs one REALITY handshake and reports what the server negotiated.
-async fn handshakes_once() -> (u16, u16, Option<Vec<u8>>) {
+/// The configured user id: 32 hexadecimal digits, dashes ignored.
+fn user_id() -> [u8; 16] {
+    let encoded = parameter("RRC_INTEROP_USER_ID");
+    let hex: Vec<u8> = encoded.bytes().filter(|byte| *byte != b'-').collect();
+    assert_eq!(hex.len(), 32, "user id must be 32 hexadecimal digits");
+    let mut bytes = [0_u8; 16];
+    for (index, chunk) in hex.chunks(2).enumerate() {
+        let text = std::str::from_utf8(chunk).expect("hex is ascii");
+        bytes[index] = u8::from_str_radix(text, 16).expect("user id must be hexadecimal");
+    }
+    bytes
+}
+
+/// The destination the node reaches for the session tests: a loopback echo it
+/// dials through its `direct` route, so bytes come back from outside the tunnel
+/// rather than from a fixture inside it.
+fn echo_target() -> (Destination, u16) {
+    let endpoint = parameter("RRC_INTEROP_ECHO");
+    let (host, port) = endpoint.rsplit_once(':').expect("echo target is host:port");
+    let port = port.parse().expect("echo port is a number");
+    let (destination, port) = Destination::parse(host, port).expect("echo is a legal destination");
+    (destination, port)
+}
+
+/// Opens one REALITY tunnel and hands back the live socket plus its handshake.
+async fn tunnel() -> (TcpStream, Handshake) {
     let address = parameter("RRC_INTEROP_ADDR");
     let server_name = parameter("RRC_INTEROP_SERVER_NAME");
     let keys = ClientKeyAgreement::generate().expect("client key agreement");
@@ -101,37 +127,43 @@ async fn handshakes_once() -> (u16, u16, Option<Vec<u8>>) {
     .await
     .expect("the server must answer inside the handshake budget")
     .unwrap_or_else(|error| panic!("REALITY handshake with v2.0.1 failed: {error}"));
-
-    let negotiated = handshake.negotiated();
-    let outcome = (
-        negotiated.suite.wire_value(),
-        negotiated.key_share_group,
-        negotiated.alpn.clone(),
-    );
-    drop(handshake);
-    let _ = stream.shutdown().await;
-    outcome
+    (stream, handshake)
 }
 
-#[tokio::test]
-#[ignore = "requires a live rust-reality v2.0.1 server"]
-async fn reality_handshake_completes_against_v201() {
-    let (suite, group, alpn) = handshakes_once().await;
+/// Asserts that what the server settled on is something this client offered.
+fn check_negotiated(negotiated: &Negotiated) {
+    let suite = negotiated.suite.wire_value();
     assert!(
         OFFERED_SUITES.contains(&suite),
         "the server selected a suite we never offered: {suite:#06x}"
     );
     assert!(
-        group == X25519_GROUP || group == X25519_MLKEM768_GROUP,
-        "the server selected a group we never shared: {group:#06x}"
+        negotiated.key_share_group == X25519_GROUP
+            || negotiated.key_share_group == X25519_MLKEM768_GROUP,
+        "the server selected a group we never shared: {:#06x}",
+        negotiated.key_share_group
     );
-    if let Some(protocol) = &alpn {
+    if let Some(protocol) = &negotiated.alpn {
         let claimed: &[u8] = protocol;
         assert!(
             ALPN.contains(&claimed),
             "the server claimed an ALPN we never offered"
         );
     }
+}
+
+/// Performs one REALITY handshake and checks what the server negotiated.
+async fn handshakes_once() {
+    let (mut stream, handshake) = tunnel().await;
+    check_negotiated(handshake.negotiated());
+    drop(handshake);
+    let _ = stream.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server"]
+async fn reality_handshake_completes_against_v201() {
+    handshakes_once().await;
 }
 
 /// Five independent handshakes, each with fresh key material.
@@ -142,12 +174,8 @@ async fn reality_handshake_completes_against_v201() {
 #[tokio::test]
 #[ignore = "requires a live rust-reality v2.0.1 server"]
 async fn repeated_handshakes_all_complete() {
-    for attempt in 1..=5 {
-        let (suite, _group, _alpn) = handshakes_once().await;
-        assert!(
-            OFFERED_SUITES.contains(&suite),
-            "attempt {attempt} did not negotiate an offered suite: {suite:#06x}"
-        );
+    for _attempt in 1..=5 {
+        handshakes_once().await;
     }
 }
 
@@ -190,4 +218,99 @@ async fn a_foreign_key_agreement_does_not_authenticate() {
         !matches!(&outcome, Ok(Ok(_))),
         "a mismatched server key must never yield an authenticated session"
     );
+}
+
+/// Opens a session to the echo target and returns it, request already accepted.
+async fn session_to_echo() -> VisionSession<TcpStream> {
+    let (destination, port) = echo_target();
+    let (stream, handshake) = tunnel().await;
+    let outcome = tokio::time::timeout(
+        READ_TIMEOUT,
+        VisionSession::connect(stream, handshake, user_id(), &destination, port),
+    )
+    .await
+    .expect("the node must accept the request inside the budget");
+    outcome.unwrap_or_else(|error| panic!("Vision session to the echo failed: {error}"))
+}
+
+/// A Vision session that carries real bytes to a destination and back.
+///
+/// Everything before this proves the tunnel is authenticated; this proves the
+/// tunnel is *useful*. v2.0.1 writes the `[0, 0]` response only after it has
+/// connected to the destination, so `connect` returning is already half the
+/// claim — the round trips prove the framed uplink, the node's switch to raw
+/// bytes once its nested-TLS detector gives up on non-TLS traffic, and that no
+/// byte was altered, duplicated or reordered across either layout.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn a_vision_session_carries_bytes_both_ways_through_v201() {
+    let mut session = session_to_echo().await;
+
+    // Small first: a failure here says the framing is wrong, not the buffers.
+    let probe = b"reality vision round trip\n";
+    session.write_all(probe).await.expect("write the probe");
+    let mut echoed = vec![0_u8; probe.len()];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+        .await
+        .expect("the echo must answer inside the budget")
+        .expect("read the probe back");
+    assert_eq!(echoed, probe);
+
+    // Then enough bytes to cross many frames in both directions.
+    let payload: Vec<u8> = (0..=250_u8)
+        .collect::<Vec<_>>()
+        .iter()
+        .copied()
+        .cycle()
+        .take(200 * 1024)
+        .collect();
+    tokio::time::timeout(READ_TIMEOUT, session.write_all(&payload))
+        .await
+        .expect("the bulk write must finish inside the budget")
+        .expect("write the bulk payload");
+    let mut received = vec![0_u8; payload.len()];
+    tokio::time::timeout(READ_TIMEOUT * 2, session.read_exact(&mut received))
+        .await
+        .expect("the bulk read must finish inside the budget")
+        .expect("read the bulk payload back");
+    assert_eq!(received, payload, "the tunnel altered or reordered bytes");
+    if let Some(error) = session.failure() {
+        panic!("the session reported a failure it survived: {error}");
+    }
+    let _ = session.shutdown().await;
+}
+
+/// Half-closing the uplink reaches the destination, and its EOF ends the tunnel.
+///
+/// The client seals an authenticated `close_notify` and nothing else
+/// (`application_io.rs:994-1015`); the node reads that alert by its description
+/// alone, flushes staged bytes and shuts its destination write half
+/// (`server/vision.rs:1116-1125`), so the echo sees a real EOF. Draining then
+/// terminates only if the node also closes the downlink it owns. A client that
+/// sent a bare FIN, or dropped the tail behind it, hangs or truncates here.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn half_close_reaches_the_destination_and_ends_the_tunnel() {
+    let mut session = session_to_echo().await;
+
+    let tail = b"last word\n";
+    session.write_all(tail).await.expect("write the tail");
+    session
+        .shutdown()
+        .await
+        .expect("half-close the uplink with an authenticated alert");
+
+    let mut echoed = Vec::new();
+    tokio::time::timeout(READ_TIMEOUT, session.read_to_end(&mut echoed))
+        .await
+        .expect("the node must close the downlink once the destination is closed")
+        .expect("drain the downlink");
+    assert_eq!(echoed, tail, "the bytes before a close must survive it");
+    assert!(
+        session.peer_closed(),
+        "the node must end the downlink with an authenticated close_notify"
+    );
+    if let Some(error) = session.failure() {
+        panic!("an orderly close is not a failure: {error}");
+    }
 }

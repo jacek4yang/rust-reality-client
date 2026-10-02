@@ -15,6 +15,7 @@ BINARY="${INTEROP_BINARY:?set INTEROP_BINARY to a v2.0.1 server binary}"
 OUT_DIR="$REPO/target/interop"
 COVER_PORT="${INTEROP_COVER_PORT:-44443}"
 ENTRY_PORT="${INTEROP_ENTRY_PORT:-14443}"
+ECHO_PORT="${INTEROP_ECHO_PORT:-14444}"
 # `true` reproduces what a production node does by default: the server keeps warm
 # cover connections and prebuilt cover profiles, whose flight carries the cover's
 # own certificate rather than a freshly forged one.
@@ -34,15 +35,28 @@ python3 "$REPO/scripts/interop/cover_tls13.py" \
   --cert "$OUT_DIR/cover.crt" --key "$OUT_DIR/cover.key" &
 COVER_PID=$!
 
-# Readiness of the cover is a completed connect, not a byte read: v2.0.1 hangs
-# if a probe consumes the listener's output.
-for _ in $(seq 1 50); do
-  if (exec 3<>/dev/tcp/127.0.0.1/"$COVER_PORT") 2>/dev/null; then
-    exec 3<&- 3>&-
-    break
-  fi
-  sleep 0.1
-done
+# Readiness of a listener is a completed connect, not a byte read: v2.0.1 hangs
+# if a probe consumes the cover listener's output, and an echo that lost the probe
+# byte would misroute the first session's data.
+wait_for_port() {
+  for _ in $(seq 1 50); do
+    if (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; then
+      exec 3<&- 3>&-
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "nothing listening on 127.0.0.1:$1" >&2
+  return 1
+}
+
+wait_for_port "$COVER_PORT"
+
+# A destination the node can reach and hand bytes to, so the session test can
+# prove the path end to end rather than only that the tunnel opened.
+python3 "$REPO/scripts/interop/echo_target.py" --accept "127.0.0.1:$ECHO_PORT" &
+ECHO_PID=$!
+wait_for_port "$ECHO_PORT"
 
 PUB_JSON=$("$BINARY" generate x25519 --json)
 PRIVATE_KEY=$(printf '%s' "$PUB_JSON" | sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -82,20 +96,21 @@ RRC_INTEROP_SERVER_NAME=localhost
 RRC_INTEROP_PUBLIC_KEY=$PUBLIC_KEY
 RRC_INTEROP_USER_ID=$USER_ID
 RRC_INTEROP_SHORT_ID=$SHORT_ID
+RRC_INTEROP_ECHO=127.0.0.1:$ECHO_PORT
 RRC_INTEROP_VERSION=$("$BINARY" --version | head -1 | tr -d '[:space:]')
 HANDOFF
 
 cleanup() {
-  kill "${SERVER_PID:-}" "$COVER_PID" 2>/dev/null || true
+  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "$COVER_PID" 2>/dev/null || true
   rm -f "$OUT_DIR/handoff.env"
 }
 trap cleanup EXIT INT TERM
 
-echo "starting v2.0.1 entry on :$ENTRY_PORT with cover :$COVER_PORT" >&2
+echo "starting v2.0.1 entry on :$ENTRY_PORT with cover :$COVER_PORT and echo :$ECHO_PORT" >&2
 if [[ "${INTEROP_CHECK_ONLY:-0}" == "1" ]]; then
   # Proves the generated configuration is one the server accepts, without
   # needing the cover to be dialled.
-  kill "$COVER_PID" 2>/dev/null || true
+  kill "$COVER_PID" "${ECHO_PID:-}" 2>/dev/null || true
   trap - EXIT
   "$BINARY" check --config "$OUT_DIR/server.json"
   exit $?
