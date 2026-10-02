@@ -11,11 +11,14 @@
 //! cargo test --test interop_v201 -- --ignored --test-threads=1
 //! ```
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::config;
 use rust_reality_client::handoff::{Established, FIRST_BYTE_BUDGET, Handoff};
+use rust_reality_client::inbound::Gate;
+use rust_reality_client::inbound::socks5::{Outcome, Proxy};
 use rust_reality_client::protocol::reality::{
     AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
     X25519_MLKEM768_GROUP, build_client_hello, complete,
@@ -539,4 +542,135 @@ async fn repeated_establishments_all_succeed_through_v201() {
             "attempt {attempt} did not reach the same destination"
         );
     }
+}
+
+/// One real SOCKS5 exchange, end to end through an unmodified v2.0.1 node.
+///
+/// The client half is hand-written bytes rather than this crate's own codec,
+/// because the claim being tested is about what an application sees: a greeting
+/// answered as SOCKS5 answers it, a `CONNECT` accepted with a bound address that is
+/// this process's own, and then the application's payload coming back through the
+/// node. Everything between the reply and the bytes is the shipped path —
+/// [`Proxy::handle`], [`Handoff`], and [`carry`](rust_reality_client::transport::carry).
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn a_socks5_connect_is_tunneled_through_v201() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let proxy = Proxy::new(Handoff::new(configured_node(), dial), Gate::default());
+    let (destination, port) = echo_target();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener for the SOCKS5 client");
+    let bound = listener.local_addr().expect("local address");
+    let mut client = TcpStream::connect(bound)
+        .await
+        .unwrap_or_else(|error| panic!("connecting as a SOCKS5 client to {bound}: {error}"));
+    let (mut served, _peer) = listener.accept().await.expect("accept the client");
+
+    let exchange = tokio::spawn(async move { proxy.handle(&mut served, bound).await });
+
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .expect("send the greeting");
+    client.flush().await.expect("flush the greeting");
+    let mut selection = [0_u8; 2];
+    tokio::time::timeout(READ_TIMEOUT, client.read_exact(&mut selection))
+        .await
+        .expect("the greeting is answered inside the budget")
+        .expect("read the method selection");
+    assert_eq!(
+        selection,
+        [0x05, 0x00],
+        "a client is told which method it is speaking, in the field it reads"
+    );
+
+    client
+        .write_all(&connect_request(&destination, port))
+        .await
+        .expect("send the CONNECT");
+    client.flush().await.expect("flush the CONNECT");
+    let mut reply = [0_u8; 10];
+    tokio::time::timeout(READ_TIMEOUT * 3, client.read_exact(&mut reply))
+        .await
+        .expect("the node answers inside the budget")
+        .expect("read the reply");
+    assert_eq!(
+        reply[..4],
+        [0x05, 0x00, 0x00, 0x01],
+        "version, success, reserved, then an IPv4 bound address"
+    );
+    assert_binds_to(&reply, bound);
+
+    let probe = b"socks5 through an unmodified v2.0.1 node\n";
+    client.write_all(probe).await.expect("send the payload");
+    let mut echoed = vec![0_u8; probe.len()];
+    tokio::time::timeout(READ_TIMEOUT, client.read_exact(&mut echoed))
+        .await
+        .expect("the echo answers inside the budget")
+        .expect("read the payload back");
+    assert_eq!(
+        echoed, probe,
+        "the tunnel altered or reordered application bytes"
+    );
+
+    client
+        .shutdown()
+        .await
+        .expect("half-close from the application side");
+    let outcome = tokio::time::timeout(READ_TIMEOUT, exchange)
+        .await
+        .expect("the exchange ends once both directions have")
+        .expect("the serving task does not panic");
+    let moved = u64::try_from(probe.len()).expect("a test payload fits a u64");
+    assert_eq!(
+        outcome,
+        Outcome::Carried(Transferred {
+            to_remote: moved,
+            to_local: moved,
+        }),
+        "the exchange reports exactly what it carried, in each direction"
+    );
+}
+
+/// The request body a SOCKS5 client sends for `CONNECT`, in the form its
+/// destination requires.
+fn connect_request(destination: &Destination, port: u16) -> Vec<u8> {
+    let mut request = vec![0x05_u8, 0x01, 0x00];
+    match destination {
+        Destination::Domain(host) => {
+            let length = u8::try_from(host.len()).expect("a real host name fits one byte");
+            request.extend([0x03, length]);
+            request.extend(host.as_bytes());
+        }
+        Destination::IPv4(octets) => {
+            request.push(0x01);
+            request.extend(octets);
+        }
+        Destination::IPv6(octets) => {
+            request.push(0x04);
+            request.extend(octets);
+        }
+    }
+    request.extend(port.to_be_bytes());
+    request
+}
+
+/// Checks the ten bytes after the greeting answer say this process's own socket,
+/// which is the only address this client is entitled to report: what is on the far
+/// side of the tunnel belongs to a node the application never named.
+fn assert_binds_to(reply: &[u8], bound: SocketAddr) {
+    let IpAddr::V4(address) = bound.ip() else {
+        panic!("the listener was bound to loopback v4");
+    };
+    assert_eq!(reply[4..8], address.octets(), "BND.ADDR");
+    assert_eq!(
+        reply[8..10],
+        bound.port().to_be_bytes(),
+        "BND.PORT must be the port this listener owns, not the destination's"
+    );
 }

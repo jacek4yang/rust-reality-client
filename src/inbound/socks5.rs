@@ -24,12 +24,29 @@
 //! implement (`BIND`, `UDP ASSOCIATE`) are answered with `0x07` after the request
 //! is consumed in full, which leaves the stream at a message boundary for whoever
 //! reads it next rather than half-parsed.
+//!
+//! The service half ([`Proxy`]) adds the one rule the codec cannot state: **a
+//! request is answered exactly once.** [`Proxy::handle`] writes its reply — a
+//! `0x00`, a refusal code, or nothing at all — and then does nothing but
+//! [`carry`](crate::transport::carry). A `0x00` commits the destination to one
+//! node's session, so from that byte onwards there is no retry, no replay and no
+//! second server to choose; if the bytes stop, the client's own read is what tells
+//! it.
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::time;
 
+use crate::error::{Error, Limit, RejectReason};
+use crate::handoff::{Established, FIRST_BYTE_BUDGET};
+use crate::inbound::{Establish, Gate};
 use crate::protocol::vless::Destination;
+use crate::transport::{Transferred, carry, verdict};
 
 /// Protocol version this inbound speaks, and the byte every conforming client
 /// opens with (RFC 1928 `VER`).
@@ -328,13 +345,273 @@ const fn hangup(reason: &'static str) -> Refusal {
     Refusal::HangUp { reason }
 }
 
+/// How long a local client may take to send its greeting.
+///
+/// [`FIRST_BYTE_BUDGET`] is upstream's bound on the first byte of a *forwarded*
+/// request (v2.0.1 `src/config/node/outbound.rs:169`), and a SOCKS5 greeting is a
+/// first byte too. The ceiling exists so that a client which connects and stops
+/// talking holds a task for fifteen seconds instead of forever; it is spent before
+/// any node is contacted, so it can never shorten what a node is given.
+pub const GREETING_BUDGET: Duration = FIRST_BYTE_BUDGET;
+
+/// How long a client may take to finish the request after its greeting was
+/// answered.
+///
+/// The same bound as the greeting, applied apart: a client that sends
+/// `[0x05, 0x01, 0x00]` and then stalls is a different failure from one that never
+/// says hello, and each gets its own budget rather than sharing one across both
+/// reads.
+pub const REQUEST_BUDGET: Duration = FIRST_BYTE_BUDGET;
+
+/// A SOCKS5 edge: what it can open tunnels to, and how many it will have at once.
+///
+/// Cloning is cheap — two `Arc`s — because every accepted connection needs its own
+/// handle on the same shared state: the same nodes, the same limits, the same
+/// beliefs about which address family answers.
+pub struct Proxy<E: Establish> {
+    establish: Arc<E>,
+    gate: Arc<Gate>,
+}
+
+impl<E: Establish> Proxy<E> {
+    /// Builds a service over one establishment seam and one set of limits.
+    #[must_use]
+    pub fn new(establish: E, gate: Gate) -> Self {
+        Self {
+            establish: Arc::new(establish),
+            gate: Arc::new(gate),
+        }
+    }
+
+    /// The limits this service enforces, for `doctor` and for tests.
+    #[must_use]
+    pub fn gate(&self) -> &Gate {
+        &self.gate
+    }
+
+    /// Runs one local exchange to its end, answering the client as it goes.
+    ///
+    /// `bound` is this process's own end of the connection, which is what `BND.ADDR`
+    /// and `BND.PORT` report. Every path out of here leaves the client told
+    /// something — a reply code, or a socket with nothing on it — so what comes
+    /// back is only for the log and the scheduler.
+    pub async fn handle<S>(&self, stream: &mut S, bound: SocketAddr) -> Outcome
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        // The greeting comes first, and that is a protocol requirement rather than
+        // a preference: a client reads the two-byte method selection before it reads
+        // anything else, so a refusal sent before it would be parsed as a method
+        // this proxy chose. Greeting first means every answer from here on is a
+        // well-formed reply, including the ones this edge refuses itself.
+        if let Err(refusal) = greet(stream).await {
+            return self.decline(stream, refusal, bound).await;
+        }
+
+        // Held for the whole exchange, relay included: the limit being enforced is
+        // "how many local connections does this process carry", not "how many has
+        // it looked at".
+        let Some(connection) = self.gate.admit_connection() else {
+            return self
+                .fail(stream, bound, Error::Limit(Limit::LocalConnections))
+                .await;
+        };
+        match read_request_under_budget(stream).await {
+            Err(refusal) => self.decline(stream, refusal, bound).await,
+            Ok(request) => self.tunnel(stream, bound, connection, request).await,
+        }
+    }
+
+    /// The half of the exchange that involves a node.
+    async fn tunnel<S>(
+        &self,
+        stream: &mut S,
+        bound: SocketAddr,
+        // Kept alive for the whole call, which is the connection's whole life: the
+        // slot is released when this returns, not when authentication does.
+        _connection: OwnedSemaphorePermit,
+        request: Request,
+    ) -> Outcome
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let Some(handshake) = self.gate.admit_handshake() else {
+            return self
+                .fail(stream, bound, Error::Limit(Limit::Handshakes))
+                .await;
+        };
+        let Request { destination, port } = request;
+        let established = self.establish.establish(destination, port).await;
+        // Authentication is over; a tunnel that then sits open for an hour is not
+        // entitled to a slot another connection needs to get in.
+        drop(handshake);
+
+        match established {
+            Err(error) => self.fail(stream, bound, error).await,
+            Ok(Established { mut session, .. }) => {
+                // This reply is the last free choice in the exchange. From here the
+                // session belongs to one node and one socket, so a stalled or reset
+                // transfer is reported to the client as an ended connection rather
+                // than quietly retried somewhere else.
+                if let Err(refusal) = answer(stream, SUCCEEDED, bound).await {
+                    // The client hung up between its request and this answer. The
+                    // tunnel is dropped with `session`, which is the only honest
+                    // cleanup left: nothing was told to anyone, so nothing has to
+                    // be taken back.
+                    return Outcome::refused(&refusal);
+                }
+                match carry(stream, &mut session).await {
+                    Ok(transferred) => Outcome::Carried(transferred),
+                    Err(error) => Outcome::Failed(verdict(session.failure(), error)),
+                }
+            }
+        }
+    }
+
+    /// Sends the reply code a codec refusal implies, and reports it.
+    async fn decline<S>(&self, stream: &mut S, refusal: Refusal, bound: SocketAddr) -> Outcome
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let outcome = Outcome::refused(&refusal);
+        if let Some(rep) = refusal.rep() {
+            // A client that has already gone cannot be told, and its absence is not
+            // a second failure worth reporting over the first.
+            let _ = answer(stream, rep, bound).await;
+        }
+        outcome
+    }
+
+    /// Sends the closest reply code SOCKS5 has for a taxonomy failure, and keeps the
+    /// failure itself for the log.
+    async fn fail<S>(&self, stream: &mut S, bound: SocketAddr, error: Error) -> Outcome
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let rep = reply_for(&error);
+        let _ = answer(stream, rep, bound).await;
+        Outcome::Failed(error)
+    }
+}
+
+impl<E: Establish> Clone for Proxy<E> {
+    fn clone(&self) -> Self {
+        Self {
+            establish: Arc::clone(&self.establish),
+            gate: Arc::clone(&self.gate),
+        }
+    }
+}
+
+impl<E: Establish> fmt::Debug for Proxy<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The seam is deliberately not printed: what it can reach is a set of nodes
+        // whose identity is secret material.
+        formatter
+            .debug_struct("Proxy")
+            .field("gate", &self.gate)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How one local exchange ended, in the forms a log line and a scheduler need.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Outcome {
+    /// The tunnel was confirmed, carried bytes, and both directions finished.
+    Carried(Transferred),
+    /// The client was refused or hung up, and no node was ever asked about it.
+    ///
+    /// This half of the split is the one that keeps scoring honest: a malformed
+    /// request, an unsupported command and a browser that closed the socket early
+    /// are all local facts, and counting any of them against a server is how a
+    /// healthy node gets circuit-broken by a typo.
+    Refused {
+        /// The reply code the client was given, or `None` for a silent hang-up.
+        rep: Option<u8>,
+        /// Why, in the words this module chose rather than the peer's.
+        reason: &'static str,
+    },
+    /// A node was asked, or a tunnel was up, and something failed.
+    ///
+    /// [`Error::classify`] decides whether the node earned it; this type does not
+    /// guess, which is what lets a local limit and a dead server stay apart on the
+    /// way to the scheduler.
+    Failed(Error),
+}
+
+impl Outcome {
+    /// Reports a codec refusal, before the reply has been written.
+    fn refused(refusal: &Refusal) -> Self {
+        Self::Refused {
+            rep: refusal.rep(),
+            reason: refusal.reason(),
+        }
+    }
+}
+
+/// The reply code SOCKS5 has for this failure, chosen for what the client can do
+/// about it rather than for what happened.
+///
+/// The mapping is lossy on purpose: RFC 1928 gives a client six words, and the
+/// taxonomy has far more. Nothing is folded into a *more* actionable code than the
+/// failure supports, which is why the local and node-shaped failures below all end
+/// up on [`GENERAL_FAILURE`] — the client cannot fix any of them, and pretending
+/// otherwise sends it retrying something that will not change.
+#[must_use]
+pub fn reply_for(error: &Error) -> u8 {
+    match error {
+        // A rule said no: this edge's limits, or the node's policy.
+        Error::Limit(_) | Error::Rejected(RejectReason::Unauthorized | RejectReason::Forbidden) => {
+            NOT_ALLOWED
+        }
+        // Nothing was reachable at that name. This is the one answer a client can
+        // act on by asking for a different address.
+        Error::Rejected(RejectReason::DestinationUnreachable) | Error::Dns(_) => HOST_UNREACHABLE,
+        // The node refused with a status this protocol has no word for.
+        Error::Rejected(RejectReason::Other(_)) => CONNECTION_REFUSED,
+        // Everything else is this client, or the path to it, failing.
+        Error::Config(_)
+        | Error::Transport(_)
+        | Error::Handshake(_)
+        | Error::Session(_)
+        | Error::Cancelled
+        | Error::Io(_) => GENERAL_FAILURE,
+    }
+}
+
+/// The greeting stage, under the budget for the bytes it waits for.
+async fn greet<S>(stream: &mut S) -> Result<(), Refusal>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    time::timeout(GREETING_BUDGET, negotiate(stream))
+        .await
+        .map_err(|_elapsed| hangup("the greeting did not arrive in time"))??;
+    Ok(())
+}
+
+/// The request stage, under the budget for the bytes it waits for.
+async fn read_request_under_budget<S>(stream: &mut S) -> Result<Request, Refusal>
+where
+    S: AsyncRead + Unpin,
+{
+    time::timeout(REQUEST_BUDGET, read_request(stream))
+        .await
+        .map_err(|_elapsed| hangup("the request did not arrive in time"))?
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::io::DuplexStream;
     use tokio::time;
+
+    use crate::error::{DnsError, HandshakeError, SessionError, TransportError};
+    use crate::inbound::{Establishment, MAX_LOCAL_CONNECTIONS};
 
     use super::*;
 
@@ -753,5 +1030,266 @@ mod tests {
                 reason: "the reply did not reach the client"
             }
         );
+    }
+
+    /// Counts how many times a seam was asked, which is how the tests below prove a
+    /// refusal never reached a node.
+    #[derive(Clone, Default)]
+    struct Tally(Arc<AtomicUsize>);
+
+    impl Tally {
+        fn bump(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn seen(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A stand-in for everything above the edge: it counts the ask and always
+    /// answers with the same failure.
+    ///
+    /// It cannot answer with a tunnel, because a tunnel is an authenticated session
+    /// with a real server — which is what `tests/interop_v201.rs` is for. What this
+    /// covers is the part a fake can decide: what the client is told, and whether a
+    /// node was contacted at all.
+    struct Fake {
+        seen: Tally,
+        failure: Error,
+    }
+
+    impl Fake {
+        fn refusing(seen: Tally, failure: Error) -> Self {
+            Self { seen, failure }
+        }
+    }
+
+    impl Establish for Fake {
+        fn establish(&self, destination: Destination, port: u16) -> Establishment {
+            self.seen.bump();
+            drop((destination, port));
+            let failure = self.failure.clone();
+            Box::pin(async move { Err(failure) })
+        }
+    }
+
+    /// Long past both stage budgets, so the codec's own decisions always win the
+    /// race, and a service that truly parked would still fail rather than hang.
+    const EXCHANGE_BUDGET: Duration = Duration::from_secs(60);
+
+    /// A greeting and one `CONNECT`, exactly as a client sends them back to back.
+    fn connect_to_ipv4() -> Vec<u8> {
+        let mut sent = vec![VERSION, 0x01, NO_AUTH];
+        sent.extend([
+            VERSION, CONNECT, 0x00, ATYP_IPV4, 203, 0, 113, 1, 0x01, 0xbb,
+        ]);
+        sent
+    }
+
+    /// The code in the request reply. Two bytes of method selection come first, and
+    /// then the reply carries its own version byte before the code: a client reads
+    /// `[5, 0]` as "no authentication", then `[5, REP, 0, ATYP, …]` as the answer.
+    fn rep_of(answered: &[u8]) -> Option<u8> {
+        answered.get(3).copied()
+    }
+
+    /// One whole exchange, from the client's side of a pipe.
+    async fn exchange<S: Establish>(proxy: &Proxy<S>, sent: &[u8]) -> (Vec<u8>, Outcome) {
+        let bound = SocketAddr::from((Ipv4Addr::LOCALHOST, 10808));
+        let (mut client, mut peer) = tokio::io::duplex(CLIENT_ROOM);
+        client
+            .write_all(sent)
+            .await
+            .expect("a whole exchange always fits the pipe");
+        let outcome = time::timeout(EXCHANGE_BUDGET, proxy.handle(&mut peer, bound))
+            .await
+            .expect("the exchange is decided, not parked");
+        drop(peer);
+        (drain(&mut client).await, outcome)
+    }
+
+    /// A refusal is answered in SOCKS5's own vocabulary, and the node behind this
+    /// edge is never asked about it.
+    #[tokio::test(start_paused = true)]
+    async fn an_unsupported_command_is_answered_without_reaching_a_node() {
+        let seen = Tally::default();
+        let proxy = Proxy::new(
+            Fake::refusing(seen.clone(), Error::Cancelled),
+            Gate::default(),
+        );
+        let mut sent = vec![VERSION, 0x01, NO_AUTH];
+        sent.extend([VERSION, BIND, 0x00, ATYP_IPV4, 203, 0, 113, 1, 0x01, 0xbb]);
+        let (reply, outcome) = exchange(&proxy, &sent).await;
+
+        assert_eq!(
+            rep_of(&reply),
+            Some(COMMAND_NOT_SUPPORTED),
+            "the client is told the command, not that the proxy broke: {reply:?}"
+        );
+        assert_eq!(
+            seen.seen(),
+            0,
+            "a command this client does not implement cannot have been forwarded"
+        );
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Refused {
+                    rep: Some(COMMAND_NOT_SUPPORTED),
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// The two local limits are reported as the rule they are, and neither one is
+    /// paid for by contacting a node.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_edge_refuses_without_bothering_a_node() {
+        for (gate, limit) in [
+            (Gate::new(0, 8), Limit::LocalConnections),
+            (Gate::new(8, 0), Limit::Handshakes),
+        ] {
+            let seen = Tally::default();
+            let proxy = Proxy::new(Fake::refusing(seen.clone(), Error::Cancelled), gate);
+            let (reply, outcome) = exchange(&proxy, &connect_to_ipv4()).await;
+
+            assert_eq!(
+                reply.get(..2),
+                Some(&[VERSION, NO_AUTH][..]),
+                "{limit} is refused after a greeting was answered, so the reply \
+                 below cannot be read as a method selection: {reply:?}"
+            );
+            assert_eq!(rep_of(&reply), Some(NOT_ALLOWED), "{limit}");
+            assert_eq!(seen.seen(), 0, "{limit} is reached before a dial");
+            assert!(
+                matches!(&outcome, Outcome::Failed(error) if *error == Error::Limit(limit)),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// Each taxonomy failure gets the code a client can act on, and gets it after
+    /// exactly one ask: the session that failed is never replayed somewhere else.
+    #[tokio::test(start_paused = true)]
+    async fn the_node_s_answer_becomes_the_code_the_client_reads() {
+        let cases = [
+            (
+                Error::Rejected(RejectReason::DestinationUnreachable),
+                HOST_UNREACHABLE,
+            ),
+            (Error::Rejected(RejectReason::Unauthorized), NOT_ALLOWED),
+            (Error::Rejected(RejectReason::Forbidden), NOT_ALLOWED),
+            (Error::Rejected(RejectReason::Other(4)), CONNECTION_REFUSED),
+            (Error::Dns(DnsError::NoAddress), HOST_UNREACHABLE),
+            (
+                Error::Handshake(HandshakeError::IdentityMismatch),
+                GENERAL_FAILURE,
+            ),
+            (Error::Transport(TransportError::Timeout), GENERAL_FAILURE),
+        ];
+        for (failure, rep) in cases {
+            let seen = Tally::default();
+            let proxy = Proxy::new(
+                Fake::refusing(seen.clone(), failure.clone()),
+                Gate::default(),
+            );
+            let (reply, outcome) = exchange(&proxy, &connect_to_ipv4()).await;
+
+            assert_eq!(rep_of(&reply), Some(rep), "for {failure}");
+            assert_eq!(seen.seen(), 1, "{failure} is asked about once");
+            assert!(
+                matches!(&outcome, Outcome::Failed(error) if *error == failure),
+                "{outcome:?} keeps the taxonomy, not just the code"
+            );
+        }
+    }
+
+    /// A client that connects and never speaks is dropped once its own stage runs
+    /// out, on a mocked clock, rather than holding a slot forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_says_nothing_is_hung_up_on_rather_than_waited_for() {
+        let seen = Tally::default();
+        let proxy = Proxy::new(
+            Fake::refusing(seen.clone(), Error::Cancelled),
+            Gate::default(),
+        );
+        let bound = SocketAddr::from((Ipv4Addr::LOCALHOST, 10808));
+        let (client, mut peer) = tokio::io::duplex(CLIENT_ROOM);
+        let outcome = proxy.handle(&mut peer, bound).await;
+
+        assert!(
+            matches!(&outcome,
+                Outcome::Refused { rep: None, reason } if *reason == "the greeting did not arrive in time"
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(seen.seen(), 0);
+        assert_eq!(
+            proxy.gate().connections_available(),
+            MAX_LOCAL_CONNECTIONS,
+            "the slot came back with the exchange"
+        );
+        drop(client);
+    }
+
+    /// The greeting and the request have separate budgets, which is only visible
+    /// when one of them is spent and the other is not: here the greeting *was*
+    /// answered, and it is the request that never came.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_stops_after_its_greeting_is_hung_up_on_too() {
+        let seen = Tally::default();
+        let proxy = Proxy::new(
+            Fake::refusing(seen.clone(), Error::Cancelled),
+            Gate::default(),
+        );
+        let bound = SocketAddr::from((Ipv4Addr::LOCALHOST, 10808));
+        let (mut client, mut peer) = tokio::io::duplex(CLIENT_ROOM);
+        client
+            .write_all(&[VERSION, 0x01, NO_AUTH])
+            .await
+            .expect("a greeting fits the pipe");
+        let outcome = proxy.handle(&mut peer, bound).await;
+
+        let mut answer = [0_u8; 2];
+        client
+            .read_exact(&mut answer)
+            .await
+            .expect("the greeting was answered");
+        assert_eq!(answer, [VERSION, NO_AUTH]);
+        assert!(
+            matches!(&outcome,
+                Outcome::Refused { rep: None, reason } if *reason == "the request did not arrive in time"
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(seen.seen(), 0, "an unanswered request never reached a node");
+    }
+
+    /// A limit, a policy refusal and a name with no address all mean something a
+    /// node did not do, so the taxonomy says so and the codes keep that apart too.
+    #[test]
+    fn a_failure_that_is_this_side_s_own_is_not_reported_as_a_destination_problem() {
+        assert_eq!(reply_for(&Error::Limit(Limit::Probes)), NOT_ALLOWED);
+        assert_eq!(
+            reply_for(&Error::Dns(DnsError::NoAddress)),
+            HOST_UNREACHABLE,
+            "the client is entitled to know nothing answered that name"
+        );
+        for failure in [
+            Error::Config("no such node".to_owned()),
+            Error::Cancelled,
+            Error::Io("too many open files".to_owned()),
+            Error::Session(SessionError::KeyExhausted),
+            Error::Transport(TransportError::Connect("refused".to_owned())),
+        ] {
+            assert_eq!(
+                reply_for(&failure),
+                GENERAL_FAILURE,
+                "{failure} is not something the client can fix"
+            );
+        }
     }
 }
