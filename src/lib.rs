@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
 
+pub mod config;
 pub mod crypto;
 pub mod entropy;
 pub mod error;
