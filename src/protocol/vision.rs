@@ -708,6 +708,66 @@ mod tests {
         assert_eq!(output, trailer);
     }
 
+    /// `Direct` is the transition the node chooses when a nested TLS record ends at
+    /// a copy-friendly boundary, and it has to be right to the byte: the content of
+    /// the frame that carries it, the frames before it, and the raw bytes that
+    /// already arrived *behind* it in the same plaintext all have to come out in
+    /// that order. Feeding one buffer that contains all three is the point — a
+    /// decoder that handed the tail to the relay before finishing the frame would
+    /// still pass a test that decoded each frame on its own.
+    #[test]
+    fn direct_command_ends_framing_without_reordering_the_bytes_around_it() {
+        assert_eq!(
+            Command::from_wire(2),
+            Ok(Command::Direct),
+            "the node's third command value is the one this client stops framing on"
+        );
+
+        let mut encoder = encoder();
+        let mut wire = Vec::new();
+        let mut emit = |encoder: &mut Encoder, content: &[u8], command: Command| {
+            let plan = encoder
+                .plan(content.len(), command, false)
+                .expect("must plan");
+            wire.resize(plan.wire_len(), 0);
+            encoder.assemble(&plan, content, &mut wire);
+            encoder.commit(&plan);
+            wire.clone()
+        };
+
+        let mut plaintext = emit(&mut encoder, b"first", Command::Continue);
+        plaintext.extend(emit(&mut encoder, b"second", Command::Direct));
+        let tail = b"raw tail";
+        plaintext.extend(tail);
+
+        let mut decoder = Decoder::new(USER);
+        let mut output = Vec::new();
+        assert_eq!(
+            decoder
+                .decode(&plaintext, &mut output)
+                .expect("one plaintext with a transition inside it must decode"),
+            Mode::Raw,
+            "the buffer that carries `Direct` is raw by the time the decoder is done"
+        );
+        assert_eq!(
+            output, b"firstsecondraw tail",
+            "framed content, then the tail of the same buffer, nothing duplicated"
+        );
+
+        let more = b"and then the stream keeps going";
+        assert_eq!(
+            decoder
+                .decode(more, &mut output)
+                .expect("raw bytes never stop being payload"),
+            Mode::Raw
+        );
+        assert_eq!(
+            output, more,
+            "and what follows the transition is appended, not re-framed — `decode` \
+             reports the bytes of the fragment it was handed"
+        );
+    }
+
     #[test]
     fn round_trips_a_multi_kibibyte_stream_across_arbitrary_fragment_sizes() {
         let pattern: Vec<u8> = (0..=250_u8).collect();
