@@ -83,7 +83,8 @@ node that cannot authenticate, five destination fault shapes, an idle tunnel
 held past the keepalive window, a connect storm, and a soak).
 
 `cargo test --locked --test interop_v201 -- --ignored --test-threads=1` is the
-gate, and CI runs it on every push.
+gate, and CI's `interop` job runs it against a node built from the commit above
+on every push to `main`, every pull request, and every tag.
 
 ## 3. Architecture
 

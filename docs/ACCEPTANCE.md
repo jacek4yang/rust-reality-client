@@ -376,8 +376,9 @@ The three hosts the commands were run on:
 
 ## Delivery
 
-- [x] **31. The README is complete.** `README.md` is 634 lines and covers the eighteen
-  required topics as numbered sections, in order: what it is (1), the exact compatibility
+- [x] **31. The README is complete.** `grep -c "^## " README.md` → 18. The eighteen
+  required topics are eighteen numbered sections, in order: what it is (1), the exact
+  compatibility
   target (2), architecture (3), installation (4), configuration (5), SOCKS5 (6), HTTP
   CONNECT (7), Pi Agent (8), multi-node stability (9), sticky routing (10), hedged dialing
   (11), the circuit breaker (12), keepalive (13), diagnostics (14), logs (15), systemd
