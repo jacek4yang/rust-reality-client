@@ -137,8 +137,10 @@ impl fmt::Debug for Handshake {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Handshake`] for protocol, identity, and verification
-/// failures, and [`Error::Io`] or a transport failure for socket errors.
+/// Returns [`Error::Handshake`] for protocol, identity and verification failures,
+/// including a peer that closes or resets the socket mid-handshake, and
+/// [`Error::Io`] only for an operating-system failure with nothing more specific to
+/// say about it.
 #[allow(clippy::too_many_lines)]
 pub async fn complete<S>(
     stream: &mut S,
@@ -360,13 +362,21 @@ where
 }
 
 /// Maps a socket failure onto the handshake taxonomy.
+///
+/// A socket that dies mid-handshake is handshake evidence, not connect evidence:
+/// TCP had already completed, so calling a reset "connect failed" would tell both
+/// the operator and the scheduler that the node was never reached, when what
+/// happened is that it was reached and would not finish authenticating. Anything
+/// the operating system reports that is not a closure keeps its own message, since
+/// there is nothing more specific to say about it.
 // Used as a `map_err` callback, which hands over the error by value.
 #[allow(clippy::needless_pass_by_value)]
 fn socket_failure(error: std::io::Error) -> Error {
-    if error.kind() == std::io::ErrorKind::UnexpectedEof {
-        Error::Handshake(HandshakeError::UnexpectedEof)
-    } else {
-        Error::Io(error.to_string())
+    match error.kind() {
+        std::io::ErrorKind::UnexpectedEof
+        | std::io::ErrorKind::BrokenPipe
+        | std::io::ErrorKind::ConnectionReset => Error::Handshake(HandshakeError::UnexpectedEof),
+        _ => Error::Io(error.to_string()),
     }
 }
 
