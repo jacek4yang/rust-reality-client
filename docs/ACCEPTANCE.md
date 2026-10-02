@@ -10,10 +10,10 @@ Two conventions make the results comparable:
 * **Tree under test.** `fa0214f` plus the changes this file is part of — the hedge
   counters, the soak measurements, the `Direct` test, the README and the two documents
   beside it. Nothing on the wire changed between `fa0214f` and the runs quoted here, and
-  the live suites were re-run from this exact tree rather than from an earlier one. The
-  artifact name ends in `-dirty` only because the packaging step ran while these
-  documents were still uncommitted; CI checks out a clean tree, and its bundle is named
-  from `git describe` alone.
+  the live suites were re-run from that content after it was committed, at `d25d8cf`,
+  which is also the commit the artifact below was packaged from. `git describe` on a clean
+  checkout of a tagged commit yields the tag, which is what a release bundle should be
+  named after.
 * **The node.** An unmodified `rust-reality` at
   `e3fc3dc36b931baec042074d6c88e928caf6941f` (tag `v2.0.1`), built with `--locked` by
   `scripts/interop/upstream-server.sh`. `git -C .upstream/rust-reality status --porcelain`
@@ -393,23 +393,30 @@ The three hosts the commands were run on:
   --numeric-owner | gzip -n` invocation that CI uses:
 
   ```text
+  VERSION=d25d8cf
   === BUILD x86_64-gnu
-      Finished `release` profile [optimized] target(s) in 19.81s
+      Finished `release` profile [optimized] target(s) in 0.10s
   SKIP x86_64-musl: target x86_64-unknown-linux-musl is not installed here
   SKIP aarch64-gnu: target aarch64-unknown-linux-gnu is not installed here
-  rust-reality-client-fa0214f-dirty-x86_64-gnu/
-  rust-reality-client-fa0214f-dirty-x86_64-gnu/README.md
-  rust-reality-client-fa0214f-dirty-x86_64-gnu/VERSION
-  rust-reality-client-fa0214f-dirty-x86_64-gnu/client.toml
-  rust-reality-client-fa0214f-dirty-x86_64-gnu/rust-reality-client
+  rust-reality-client-d25d8cf-x86_64-gnu/
+  rust-reality-client-d25d8cf-x86_64-gnu/README.md
+  rust-reality-client-d25d8cf-x86_64-gnu/VERSION
+  rust-reality-client-d25d8cf-x86_64-gnu/client.toml
+  rust-reality-client-d25d8cf-x86_64-gnu/rust-reality-client
   ```
 
-  The staged binary runs (`rust-reality-client 0.1.0`, exit 0), the archive is 932 334
-  bytes from a 1 934 488-byte stripped binary, and the tar listing is byte-stable because
-  the ownership, mtime and gzip name are zeroed. **The other two matrix rows are not
-  executed here**: the WSL user space has no `musl-gcc` and no `aarch64-linux-gnu-gcc`, and
-  installing them needs `sudo`, which this session does not have. Their CI rows carry
-  `packages: musl-tools` and `packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross` with
+  The `0.10s` is a cache hit, and it is the useful part of the output: this step was run
+  once before, from the same content at `fa0214f-dirty`, where the compile took 19.81 s and
+  produced a 932 334-byte archive. Committing the documents changed nothing but the version
+  string, so the release binary was reused and the archive changed by exactly one byte.
+
+  The staged binary runs (`rust-reality-client 0.1.0`, exit 0), the archive is 932 333
+  bytes around a 1 934 488-byte stripped binary, and the tar listing is byte-stable
+  because the ownership, mtime and gzip name are zeroed. **The other two
+  matrix rows are not executed here**: the WSL user space has no `musl-gcc` and no
+  `aarch64-linux-gnu-gcc`, and installing them needs `sudo`, which this session does not
+  have. Their CI rows carry `packages: musl-tools` and
+  `packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross` with
   `linker: aarch64-linux-gnu-gcc`, which is what `ubuntu-24.04` provides; that is a
   reasoned claim, not a measured one, and it is the reason this box says "steps" rather
   than "workflow".
@@ -417,9 +424,9 @@ The three hosts the commands were run on:
 - [x] **33. `SHA256SUMS` is generated and verifies.**
 
   ```text
-  e6a450203c943b1908a691ba8728240daf8127edac9ca376d1ae4944d53540bd  rust-reality-client-fa0214f-dirty-x86_64-gnu.tar.gz
+  96481cc82b6d4b0c84aa93c20e7b22a42fd3675a95791ca80abccc4c647381c1  rust-reality-client-d25d8cf-x86_64-gnu.tar.gz
   === VERIFY
-  rust-reality-client-fa0214f-dirty-x86_64-gnu.tar.gz: OK
+  rust-reality-client-d25d8cf-x86_64-gnu.tar.gz: OK
   ```
 
   `sha256sum --check --strict SHA256SUMS` exits 0 — `--strict`, so a listed file that is
