@@ -28,7 +28,7 @@
 //! The service half ([`Proxy`]) adds the one rule the codec cannot state: **a
 //! request is answered exactly once.** [`Proxy::handle`] writes its reply — a
 //! `0x00`, a refusal code, or nothing at all — and then does nothing but
-//! [`carry`](crate::transport::carry). A `0x00` commits the destination to one
+//! [`carry`]. A `0x00` commits the destination to one
 //! node's session, so from that byte onwards there is no retry, no replay and no
 //! second server to choose; if the bytes stop, the client's own read is what tells
 //! it.

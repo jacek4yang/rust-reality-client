@@ -2,7 +2,7 @@
 //!
 //! Applications do not speak VLESS, so this layer exists to translate. A browser
 //! or a CLI tool offers SOCKS5 ([`socks5`]), and a `HTTPS_PROXY`-style environment
-//! variable points at HTTP `CONNECT`. Both are parsed by hand rather than pulled
+//! variable points at HTTP `CONNECT` ([`http`]). Both are parsed by hand rather than pulled
 //! from a crate, because every byte at this edge is attacker-controlled and the
 //! only bound that holds for sure is the one written next to the read.
 //!
@@ -27,6 +27,7 @@ use crate::error::Error;
 use crate::handoff::{Established, Handoff};
 use crate::protocol::vless::Destination;
 
+pub mod http;
 pub mod socks5;
 
 /// The most local connections this edge serves at once.

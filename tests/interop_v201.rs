@@ -11,13 +11,14 @@
 //! cargo test --test interop_v201 -- --ignored --test-threads=1
 //! ```
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::config;
 use rust_reality_client::handoff::{Established, FIRST_BYTE_BUDGET, Handoff};
 use rust_reality_client::inbound::Gate;
+use rust_reality_client::inbound::http;
 use rust_reality_client::inbound::socks5::{Outcome, Proxy};
 use rust_reality_client::protocol::reality::{
     AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
@@ -637,6 +638,83 @@ async fn a_socks5_connect_is_tunneled_through_v201() {
     );
 }
 
+/// One real HTTP `CONNECT` exchange, end to end through an unmodified v2.0.1 node.
+///
+/// Same rule as the SOCKS5 exchange above: the client half is hand-written bytes,
+/// because the claim is about what an application sees. This one also proves the
+/// property that decides how `src/inbound/http.rs` reads at all — the application's
+/// first bytes are sent **before** the answer is read, in the same write, and they
+/// still arrive. A head parser that read in blocks and threw away what it over-read
+/// would echo nothing here, and the read would time out.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn an_http_connect_is_tunneled_through_v201() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let proxy = http::Proxy::new(Handoff::new(configured_node(), dial), Gate::default());
+    let (destination, port) = echo_target();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener for the HTTP client");
+    let bound = listener.local_addr().expect("local address");
+    let mut client = TcpStream::connect(bound)
+        .await
+        .unwrap_or_else(|error| panic!("connecting as an HTTP client to {bound}: {error}"));
+    let (served, _peer) = listener.accept().await.expect("accept the client");
+
+    let exchange = tokio::spawn(async move { proxy.handle(served).await });
+
+    let probe = b"CONNECT head and payload in one write\n";
+    let mut sent = connect_head(&destination, port);
+    sent.extend_from_slice(probe);
+    client
+        .write_all(&sent)
+        .await
+        .expect("send the head and the payload");
+    client.flush().await.expect("flush both");
+
+    let mut answer = [0_u8; ESTABLISHED.len()];
+    tokio::time::timeout(READ_TIMEOUT * 3, client.read_exact(&mut answer))
+        .await
+        .expect("the node answers inside the budget")
+        .expect("read the whole status line and its blank line");
+    assert_eq!(
+        &answer, ESTABLISHED,
+        "a tunnel is confirmed with 200 and nothing else, so the payload is not read as a body"
+    );
+
+    let mut echoed = vec![0_u8; probe.len()];
+    tokio::time::timeout(READ_TIMEOUT, client.read_exact(&mut echoed))
+        .await
+        .expect("the echo answers inside the budget")
+        .expect("read the payload back");
+    assert_eq!(
+        echoed, probe,
+        "the bytes sent ahead of the answer were lost"
+    );
+
+    client
+        .shutdown()
+        .await
+        .expect("half-close from the application side");
+    let outcome = tokio::time::timeout(READ_TIMEOUT, exchange)
+        .await
+        .expect("the exchange ends once both directions have")
+        .expect("the serving task does not panic");
+    let moved = u64::try_from(probe.len()).expect("a test payload fits a u64");
+    assert_eq!(
+        outcome,
+        http::Outcome::Carried(Transferred {
+            to_remote: moved,
+            to_local: moved,
+        }),
+        "the exchange reports exactly what it carried, in each direction"
+    );
+}
+
 /// The request body a SOCKS5 client sends for `CONNECT`, in the form its
 /// destination requires.
 fn connect_request(destination: &Destination, port: u16) -> Vec<u8> {
@@ -673,4 +751,19 @@ fn assert_binds_to(reply: &[u8], bound: SocketAddr) {
         bound.port().to_be_bytes(),
         "BND.PORT must be the port this listener owns, not the destination's"
     );
+}
+
+/// The exact answer a `CONNECT` on HTTP/1.1 is promised.
+const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// The head an HTTP client sends for `CONNECT`, with the target form its destination
+/// requires — brackets for IPv6, because a colon inside an address is otherwise
+/// ambiguous.
+fn connect_head(destination: &Destination, port: u16) -> Vec<u8> {
+    let host = match destination {
+        Destination::Domain(host) => host.clone(),
+        Destination::IPv4(octets) => Ipv4Addr::from(*octets).to_string(),
+        Destination::IPv6(octets) => format!("[{}]", Ipv6Addr::from(*octets)),
+    };
+    format!("CONNECT {host}:{port} HTTP/1.1\r\n\r\n").into_bytes()
 }
