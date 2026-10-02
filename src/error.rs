@@ -41,12 +41,14 @@ impl Error {
         match self {
             // Nothing was learned about the node: configuration and limits are
             // local policy, a name with no address never reached one, a
-            // cancelled attempt was stopped by us rather than by a peer, and a
-            // request that could not be encoded or padded sent no byte at all.
+            // cancelled attempt was stopped by us rather than by a peer, a
+            // request that could not be encoded or padded sent no byte at all,
+            // and the socket that broke was the application's own.
             Self::Config(_)
             | Self::Limit(_)
             | Self::Cancelled
             | Self::Dns(DnsError::NoAddress)
+            | Self::Transport(TransportError::Local(_))
             | Self::Session(SessionError::RequestTooLong | SessionError::Entropy) => Failure::Local,
             Self::Dns(_) => Failure::Dns,
             Self::Transport(TransportError::BrokenPipe | TransportError::Socket(_))
@@ -153,6 +155,15 @@ pub enum TransportError {
     /// own message. Only a live tunnel reports this: reaching a node at all is
     /// [`Self::Connect`].
     Socket(String),
+    /// The socket on the application's side of the relay broke, with the
+    /// operating system's own message.
+    ///
+    /// The relay cannot say why: a browser killed mid-download, a local policy
+    /// reset and a client that simply gave up all look the same from the near
+    /// end. What none of them mean is that the node did anything, which is why
+    /// this is [`Failure::Local`] and the [`Self::Socket`] an idle tunnel
+    /// reports is not.
+    Local(String),
 }
 
 impl fmt::Display for TransportError {
@@ -162,6 +173,7 @@ impl fmt::Display for TransportError {
             Self::Timeout => formatter.write_str("connect timed out"),
             Self::BrokenPipe => formatter.write_str("connection broken"),
             Self::Socket(message) => write!(formatter, "socket error: {message}"),
+            Self::Local(message) => write!(formatter, "local connection error: {message}"),
         }
     }
 }
