@@ -16,6 +16,12 @@ OUT_DIR="$REPO/target/interop"
 COVER_PORT="${INTEROP_COVER_PORT:-44443}"
 ENTRY_PORT="${INTEROP_ENTRY_PORT:-14443}"
 ECHO_PORT="${INTEROP_ECHO_PORT:-14444}"
+# The four fault shapes in `fault_targets.py`, plus one port nothing listens on.
+LATE_PORT="${INTEROP_LATE_PORT:-14445}"
+DROP_PORT="${INTEROP_DROP_PORT:-14446}"
+RST_PORT="${INTEROP_RST_PORT:-14447}"
+TRUNCATE_PORT="${INTEROP_TRUNCATE_PORT:-14448}"
+CLOSED_PORT="${INTEROP_CLOSED_PORT:-14449}"
 # `true` reproduces what a production node does by default: the server keeps warm
 # cover connections and prebuilt cover profiles, whose flight carries the cover's
 # own certificate rather than a freshly forged one.
@@ -58,6 +64,21 @@ python3 "$REPO/scripts/interop/echo_target.py" --accept "127.0.0.1:$ECHO_PORT" &
 ECHO_PID=$!
 wait_for_port "$ECHO_PORT"
 
+# The destination-side fault shapes. They live here rather than in each test
+# because a test cannot open a listener the node dials from: only WSL's own
+# loopback is reachable from the server process. `$CLOSED_PORT` is deliberately
+# left unlistened — that absence is the fault.
+python3 "$REPO/scripts/interop/fault_targets.py" \
+  --late "127.0.0.1:$LATE_PORT" \
+  --drop "127.0.0.1:$DROP_PORT" \
+  --rst "127.0.0.1:$RST_PORT" \
+  --truncate "127.0.0.1:$TRUNCATE_PORT" &
+FAULT_PID=$!
+wait_for_port "$LATE_PORT"
+wait_for_port "$DROP_PORT"
+wait_for_port "$RST_PORT"
+wait_for_port "$TRUNCATE_PORT"
+
 PUB_JSON=$("$BINARY" generate x25519 --json)
 PRIVATE_KEY=$(printf '%s' "$PUB_JSON" | sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 PUBLIC_KEY=$(printf '%s' "$PUB_JSON" | sed -n 's/.*"publicKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -97,11 +118,16 @@ RRC_INTEROP_PUBLIC_KEY=$PUBLIC_KEY
 RRC_INTEROP_USER_ID=$USER_ID
 RRC_INTEROP_SHORT_ID=$SHORT_ID
 RRC_INTEROP_ECHO=127.0.0.1:$ECHO_PORT
+RRC_INTEROP_LATE=127.0.0.1:$LATE_PORT
+RRC_INTEROP_DROP=127.0.0.1:$DROP_PORT
+RRC_INTEROP_RST=127.0.0.1:$RST_PORT
+RRC_INTEROP_TRUNCATE=127.0.0.1:$TRUNCATE_PORT
+RRC_INTEROP_CLOSED=127.0.0.1:$CLOSED_PORT
 RRC_INTEROP_VERSION=$("$BINARY" --version | head -1 | tr -d '[:space:]')
 HANDOFF
 
 cleanup() {
-  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "$COVER_PID" 2>/dev/null || true
+  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "$COVER_PID" 2>/dev/null || true
   rm -f "$OUT_DIR/handoff.env"
 }
 trap cleanup EXIT INT TERM
@@ -110,7 +136,7 @@ echo "starting v2.0.1 entry on :$ENTRY_PORT with cover :$COVER_PORT and echo :$E
 if [[ "${INTEROP_CHECK_ONLY:-0}" == "1" ]]; then
   # Proves the generated configuration is one the server accepts, without
   # needing the cover to be dialled.
-  kill "$COVER_PID" "${ECHO_PID:-}" 2>/dev/null || true
+  kill "$COVER_PID" "${ECHO_PID:-}" "${FAULT_PID:-}" 2>/dev/null || true
   trap - EXIT
   "$BINARY" check --config "$OUT_DIR/server.json"
   exit $?
