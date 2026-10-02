@@ -1,0 +1,11 @@
+# The interop scripts run under bash/WSL, where a CRLF checkout breaks them,
+# and the protocol fixtures are compared byte for byte.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.sql text eol=lf

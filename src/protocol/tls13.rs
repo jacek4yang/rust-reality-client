@@ -382,6 +382,14 @@ impl std::fmt::Display for KeyError {
 
 impl std::error::Error for KeyError {}
 
+impl From<KeyError> for crate::error::Error {
+    fn from(_: KeyError) -> Self {
+        // Every variant is a failure of our own derivation against the
+        // negotiated transcript, not a defect the peer can cause.
+        Self::Handshake(crate::error::HandshakeError::Verification)
+    }
+}
+
 /// No-PSK TLS 1.3 key schedule.
 pub struct KeySchedule {
     suite: CipherSuite,
@@ -635,6 +643,18 @@ impl std::fmt::Display for RecordError {
 
 impl std::error::Error for RecordError {}
 
+impl From<RecordError> for crate::error::Error {
+    fn from(error: RecordError) -> Self {
+        // Sealing failures are ours; opening failures are mapped by the caller,
+        // which alone knows whether a bad tag means a foreign server or a
+        // corrupt stream.
+        Self::Handshake(crate::error::HandshakeError::Protocol(match error {
+            RecordError::KeyExhausted => "record key exhausted",
+            _ => "record layer",
+        }))
+    }
+}
+
 /// Maximum plaintext bytes in one record.
 pub const MAX_PLAINTEXT_LEN: usize = 1 << 14;
 
@@ -798,13 +818,42 @@ impl RecordLayer {
         plaintext: &[u8],
         output: &mut Vec<u8>,
     ) -> Result<(), RecordError> {
+        self.seal_with_padding(content_type, plaintext, 0, output)
+    }
+
+    /// Test-only view of the padded form, which only a server ever writes.
+    #[cfg(test)]
+    pub(crate) fn seal_padded(
+        &mut self,
+        content_type: ContentType,
+        plaintext: &[u8],
+        padding_len: usize,
+        output: &mut Vec<u8>,
+    ) -> Result<(), RecordError> {
+        self.seal_with_padding(content_type, plaintext, padding_len, output)
+    }
+
+    /// Seals one record whose payload is followed by `padding_len` zero bytes.
+    ///
+    /// A server uses this to re-seal its freshly generated handshake messages to
+    /// the wire length the cover target was observed using
+    /// (`tls13/handshake.rs:590-605`). The padding goes *after* the inner content
+    /// type, which is what lets a reader find that type as the last non-zero byte
+    /// of the decrypted region (`record.rs:643-655`). This client reads such
+    /// records but never writes them.
+    fn seal_with_padding(
+        &mut self,
+        content_type: ContentType,
+        plaintext: &[u8],
+        padding_len: usize,
+        output: &mut Vec<u8>,
+    ) -> Result<(), RecordError> {
         self.ensure_available()?;
-        if plaintext.len() > MAX_PLAINTEXT_LEN {
-            return Err(RecordError::InvalidLength);
-        }
         let inner_len = plaintext
             .len()
             .checked_add(1)
+            .and_then(|length| length.checked_add(padding_len))
+            .filter(|length| *length <= MAX_INNER_PLAINTEXT_LEN)
             .ok_or(RecordError::InvalidLength)?;
         let ciphertext_len = inner_len
             .checked_add(TAG_LEN)
@@ -822,6 +871,7 @@ impl RecordLayer {
         output.extend_from_slice(&header);
         output.extend_from_slice(plaintext);
         output.push(content_type.wire_value());
+        output.resize(start + HEADER_LEN + inner_len, 0);
         let body = &mut output[start + HEADER_LEN..];
         let nonce = self.nonce();
         let tag = self.cipher.seal(&nonce, &header, body)?;
@@ -898,7 +948,13 @@ impl RecordLayer {
                     Err(RecordError::KeyExhausted)
                 }
             }
-            CipherSuite::ChaCha20Poly1305Sha256 => Ok(()),
+            CipherSuite::ChaCha20Poly1305Sha256 => {
+                if self.sequence < u64::MAX {
+                    Ok(())
+                } else {
+                    Err(RecordError::KeyExhausted)
+                }
+            }
         }
     }
 

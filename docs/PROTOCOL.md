@@ -128,10 +128,12 @@ Server-side acceptance conditions (`auth.rs:474-535`):
 
 ## TLS 1.3 continuation
 
-`src/protocol/reality/tls13/handshake.rs:332-420`
+`src/protocol/reality/tls13/handshake.rs:330-531` (`build_server_flight_inner`)
 
 - transcript = `client_hello.raw_message() || server_hello_message` — the real
-  ClientHello **with** its non-zero REALITY session ID (`:363`, `:370-371`).
+  ClientHello **with** its non-zero REALITY session ID (`:361-362`, `:369-372`).
+  The transcript is hashed incrementally, so a client that hashes the same byte
+  ranges gets the same `Finished` (`:369-372`).
 - key schedule = ordinary RFC 8446 no-PSK over the ECDHE shared secret
   (`keys.rs:468-506`, RFC 8448 vectors at `keys.rs:670-755`).
 - hybrid group, when the cover selected `X25519MLKEM768` (`0x11ec`):
@@ -139,16 +141,71 @@ Server-side acceptance conditions (`auth.rs:474-535`):
   shared secret = ml-kem shared(32) || x25519 shared(32) (`handshake.rs:663-700`).
   A client that offers only X25519 fails with `MissingClientKeyShare` whenever
   the live cover negotiates the hybrid group, so the client offers both.
-- server flight: optional plaintext CCS, then encrypted
-  EncryptedExtensions / Certificate / CertificateVerify / Finished, possibly
-  followed by one empty ApplicationData record standing in for a fake NST
-  (`handshake.rs:418-470`, `architecture.md` §2).
-- client flight: an optional CCS **exactly** `[0x16/0x14 3 3 0 1 1]` followed by
-  one encrypted ClientFinished record (`tls13/handshake_read.rs:63-88`).
-- record bounds: `MAX_PLAINTEXT_LEN = 1 << 14`, 16-byte AEAD tag, outer content
-  type 23, legacy version `{3,3}` (`tls13/record.rs:16-23,44`). Empty
-  application records occur and must be skipped, not treated as EOF
-  (`server/vision.rs:1121-1123`).
+- server flight: plaintext `ServerHello`, optional plaintext CCS, then
+  EncryptedExtensions / Certificate / CertificateVerify / Finished sealed under
+  the handshake keys, optionally followed by one fake New Session Ticket record
+  sealed under the **application** keys (`:459-521`).
+- client flight: an **exact** CCS record `[20 3 3 0 1 1]`
+  (`server_hello.rs:353-355`, optional) followed by exactly one encrypted
+  ClientFinished record; `tls13/handshake_read.rs:52-100` reads that and nothing
+  else, so the client must not wait for anything after it has sent its flight.
+
+### Record shapes and padding
+
+`CoverHandshakeRecordShape` (`tls13/target_read.rs:49-63`) is copied from the
+cover target that answered, so one node presents different shapes on different
+days. The server re-seals *its own freshly generated* messages, zero-padding each
+record to the cover's observed outer length:
+
+```text
+padding      = target_wire_len - (message_len + 22)     :580-588
+overhead     = 5 header + 1 inner content type + 16 tag  record.rs:26
+             = UNPADDED_RECORD_WIRE_OVERHEAD
+inner region = payload || inner_content_type || 0x00 * padding   record.rs:412-460
+```
+
+Three shapes exist (`handshake.rs:418-455`):
+
+| shape | records | notes |
+| --- | --- | --- |
+| `None` | one unpadded, coalesced | only `build_server_flight` (`:302`), which has no production caller |
+| `Coalesced { wire_len }` | one padded, coalesced | cover's first encrypted record exceeded 512 bytes |
+| `PositionalRecords { wire_lens: [4], nst_wire_len }` | four padded, one per message | plus an **optional** fifth record: the fake ticket |
+
+Reading rules that follow from this:
+
+- A message does **not** fill its record. The reader must frame messages by their
+  own `u24` length inside the decrypted region and tolerate trailing zeros
+  (`record.rs:643-655` finds the inner content type as the last non-zero byte).
+- The fake ticket is an **empty `ApplicationData` record at sequence 0 of the
+  application keys**. The same `Tls13RecordLayer` that sealed it becomes the
+  tunnel's server-to-client direction (`:406`, `:503-510`, `:528`), so when it
+  arrives the server's first tunnel record is already at sequence 1. A client
+  therefore must *not* consume or discard it during the handshake: leaving it in
+  the socket and opening it as an ordinary record keeps both sides in step
+  whether or not it appears. Its arrival is timing-dependent, so the same cover
+  yields 4 or 5 records on different connections.
+- Application records are **never** padded (`application_io.rs:1030` passes
+  `padding_len = 0`), which is why the last-non-zero-byte rule is lossless for
+  payload data.
+- `body_len == 0` is rejected, and `record.len()` must equal
+  `5 + body_len` exactly (`application_io.rs:508-520`, `record.rs:616-645`).
+- An inner content type of Alert carries a two-byte `[level, description]`
+  (`application_io.rs:536-541`); `description == 0` is `close_notify` and the
+  server treats it as an orderly half-close (`server/vision.rs:1116-1123`).
+  Inner Handshake or CCS records after the handshake are errors
+  (`application_io.rs:542-544`).
+- Bounds: `MAX_PLAINTEXT_LEN = 1 << 14`, tag 16, outer content type 23, legacy
+  version `{3,3}`; AES-GCM allows `1 << 24` records per key
+  (`record.rs:16-27,665-676`).
+
+### ALPN may be absent
+
+`cover_compatible_alpn` (`handshake.rs:547-566`) drops a selected ALPN when the
+EncryptedExtensions that claims it would not fit the cover's observed first
+record slot — an `h2` claim needs 33 bytes and an OpenSSL-derived slot can be 28.
+So `alpn = None` is an expected outcome of this cover class and the client must
+accept it rather than treat it as a mismatch.
 
 ## REALITY server authentication (what proves the server is real)
 
