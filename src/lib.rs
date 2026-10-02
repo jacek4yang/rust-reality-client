@@ -10,6 +10,7 @@
 //! |---|---|---|
 //! | Wire | `protocol::vless`, `protocol::vision`, `protocol::reality` | framing, padding, authentication |
 //! | Route | `scheduler` | node selection, hedged dial, circuit breaking |
+//! | Handoff | `handoff` | one node, one authenticated tunnel |
 //! | Connect | `transport` | TCP, keepalive, half-close, relay |
 //! | Edge | `inbound` | SOCKS5 and HTTP CONNECT |
 //! | Host | `config`, `logging`, `error` | validation, redaction, failure taxonomy |
@@ -42,5 +43,6 @@ pub mod config;
 pub mod crypto;
 pub mod entropy;
 pub mod error;
+pub mod handoff;
 pub mod protocol;
 pub mod transport;

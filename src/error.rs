@@ -252,7 +252,8 @@ pub enum SessionError {
     KeyExhausted,
     /// Vision framing could not be decoded.
     Framing(&'static str),
-    /// Operating-system entropy was unavailable, so a frame could not be padded.
+    /// Operating-system entropy was unavailable, so a frame could not be padded or
+    /// an ephemeral key could not be generated.
     ///
     /// Padding lengths are drawn per frame, so this can surface long after a
     /// session started. It is reported apart from a framing error because the

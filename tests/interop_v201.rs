@@ -14,12 +14,16 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use rust_reality_client::config;
+use rust_reality_client::handoff::{FIRST_BYTE_BUDGET, Handoff};
 use rust_reality_client::protocol::reality::{
     AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
     X25519_MLKEM768_GROUP, build_client_hello, complete,
 };
 use rust_reality_client::protocol::vless::Destination;
-use rust_reality_client::transport::VisionSession;
+use rust_reality_client::transport::{
+    AddressFamily, Dial, DialPolicy, Environment, Tuning, VisionSession,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
@@ -312,5 +316,149 @@ async fn half_close_reaches_the_destination_and_ends_the_tunnel() {
     );
     if let Some(error) = session.failure() {
         panic!("an orderly close is not a failure: {error}");
+    }
+}
+
+/// The live node, read through the client's own configuration validator.
+///
+/// Building it from a document rather than by hand keeps this a test of the shipped
+/// path: what the handoff layer receives is exactly the `Node` an operator's file
+/// produces, key encoding included.
+fn configured_node() -> config::Node {
+    let address = parameter("RRC_INTEROP_ADDR");
+    let (host, port) = address
+        .rsplit_once(':')
+        .expect("the interop address carries a port");
+    let port = port.parse::<u16>().expect("the interop port is a number");
+    let text = format!(
+        r#"[listen]
+socks5 = "127.0.0.1:10808"
+http = "127.0.0.1:10809"
+
+[[node]]
+name = "interop"
+address = "{host}"
+port = {port}
+userId = "{}"
+[node.reality]
+publicKey = "{}"
+shortId = "{}"
+serverName = "{}"
+"#,
+        parameter("RRC_INTEROP_USER_ID"),
+        parameter("RRC_INTEROP_PUBLIC_KEY"),
+        parameter("RRC_INTEROP_SHORT_ID"),
+        parameter("RRC_INTEROP_SERVER_NAME"),
+    );
+    let mut parsed = config::parse(&text)
+        .unwrap_or_else(|error| panic!("the live node must be expressible as config: {error}"));
+    parsed.nodes.remove(0)
+}
+
+/// The whole establishment path, end to end against v2.0.1.
+///
+/// This is the call an inbound will make: resolve, race candidates, authenticate the
+/// peer as the configured REALITY server, send the VLESS request, and return a
+/// session whose remote side already exists. The tests above prove the bytes; this
+/// proves the composition — that the socket the dial layer hands over is the one the
+/// handshake rides on, that the identity in a configuration file is the identity the
+/// server accepts, and that what comes back carries timings worth trusting.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn the_handoff_layer_establishes_through_v201() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let handoff = Handoff::new(configured_node(), dial.clone());
+    let (destination, port) = echo_target();
+
+    let established = tokio::time::timeout(READ_TIMEOUT * 3, handoff.establish(&destination, port))
+        .await
+        .expect("establishment must finish inside the budget")
+        .unwrap_or_else(|error| panic!("establishment through v2.0.1 failed: {error}"));
+
+    check_negotiated(established.session.negotiated());
+    assert_eq!(
+        established.address.to_string(),
+        parameter("RRC_INTEROP_ADDR"),
+        "the winner must be the address the node was configured with"
+    );
+    assert_eq!(established.family, AddressFamily::Ipv4);
+    assert!(
+        established.connect_latency < FIRST_BYTE_BUDGET,
+        "TCP to a local node cannot spend the whole first-byte budget: {:?}",
+        established.connect_latency
+    );
+    assert!(
+        established.total_latency >= established.connect_latency,
+        "the whole call cannot be faster than the stage inside it"
+    );
+
+    // The shared beliefs, not a private copy: establishment is what teaches the
+    // dial layer that this family works, and the next connection starts from it.
+    assert!(
+        dial.environment()
+            .recent_latency(established.family, dial.tuning())
+            .is_some(),
+        "a winning connection must leave a latency the next dial can use"
+    );
+    assert!(
+        !dial
+            .environment()
+            .is_penalized(established.family, dial.tuning()),
+        "a node that answered cannot end up penalised for it"
+    );
+
+    let probe = b"established through the handoff layer\n";
+    let mut session = established.session;
+    session.write_all(probe).await.expect("write the probe");
+    let mut echoed = vec![0_u8; probe.len()];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+        .await
+        .expect("the echo must answer inside the budget")
+        .expect("read the probe back");
+    assert_eq!(echoed, probe);
+}
+
+/// Three establishments in a row over one dial, each through the full path.
+///
+/// v2.0.1 keeps a replay cache of authenticators, so a client that reused a
+/// `ClientHello` would find its second connection silently served by the cover
+/// target instead of the node. The handoff layer builds fresh key material per
+/// attempt; this is the version of that claim a server can actually falsify.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn repeated_establishments_all_succeed_through_v201() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let (destination, port) = echo_target();
+
+    for attempt in 1..=3 {
+        let handoff = Handoff::new(configured_node(), dial.clone());
+        let mut session =
+            tokio::time::timeout(READ_TIMEOUT * 3, handoff.establish(&destination, port))
+                .await
+                .unwrap_or_else(|_| panic!("attempt {attempt} must finish inside the budget"))
+                .unwrap_or_else(|error| panic!("attempt {attempt} must establish: {error}"))
+                .session;
+
+        let marker = format!("attempt {attempt}\n");
+        session
+            .write_all(marker.as_bytes())
+            .await
+            .expect("write the marker");
+        let mut echoed = vec![0_u8; marker.len()];
+        tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+            .await
+            .expect("the echo must answer inside the budget")
+            .expect("read the marker back");
+        assert_eq!(
+            echoed,
+            marker.as_bytes(),
+            "attempt {attempt} did not reach the same destination"
+        );
     }
 }
