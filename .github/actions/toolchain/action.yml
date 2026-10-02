@@ -1,0 +1,32 @@
+name: pinned toolchain
+description: >-
+  Install the one Rust toolchain this repository is gate-kept by. The version is
+  an input so that a bump is a single line, and it is always an exact patch
+  release: a floating channel would change the lints under a commit that passed.
+
+inputs:
+  version:
+    description: Exact rustup version channel, never a floating one
+    required: true
+  components:
+    description: Space-separated rustup components
+    required: false
+    default: clippy rustfmt
+
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.version }}
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        args=()
+        for component in $COMPONENTS; do
+          args+=(--component "$component")
+        done
+        rustup toolchain install "$VERSION" --profile minimal "${args[@]}"
+        rustup default "$VERSION"
+        rustup show active-toolchain
+        cargo --version

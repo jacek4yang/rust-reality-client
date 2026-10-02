@@ -1,0 +1,237 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded push does not need its own answer, and two runs of the interop
+# job competing for the same ports is a worse failure than no answer.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Reading this run's own artifacts back is what makes the checksum job
+  # possible; nothing in this workflow writes to the repository.
+  actions: read
+
+env:
+  # Every job uses the same compiler, and it is named by patch release rather
+  # than by channel. Clippy gains and moves lints between releases, so a
+  # floating `stable` would let a commit pass here and be rejected later by a
+  # rule that did not exist when it was written.
+  RUST: 1.98.1
+  # The `rust-version` this crate declares, checked by building against it
+  # rather than by asserting it in a README no compiler reads.
+  MSRV: 1.85.0
+  # The node the client is proved against: `jacek4yang/rust-reality` at its
+  # v2.0.1 tag, named by commit so this gate cannot drift onto a later server.
+  UPSTREAM_NODE: e3fc3dc36b931baec042074d6c88e928caf6941f
+  UPSTREAM_URL: https://github.com/jacek4yang/rust-reality
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: Formatting and lints
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: cargo fmt
+        run: cargo fmt --check --all
+      # `-D warnings` is the whole point: a pedantic lint this repository has
+      # decided to deny must not be able to arrive quietly in a later commit.
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: Unit, integration and byte-mutation suites
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      # The v2.0.1 interop and fault suites are `#[ignore]`d, because they need
+      # a live node: they run in the `interop` job, not here. Everything else is
+      # hermetic and reaches no network.
+      - name: cargo test
+        run: cargo test --locked
+
+  msrv:
+    name: Declared minimum supported Rust version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.MSRV }}
+          components: ""
+      - name: cargo check on ${{ env.MSRV }}
+        run: cargo check --locked --all-targets
+
+  interop:
+    name: Wire compatibility with an unmodified v2.0.1 node
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+
+      - name: Build the node from its pinned commit
+        run: |
+          git clone --quiet "$UPSTREAM_URL" "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --quiet --detach "$UPSTREAM_NODE"
+          git -C "$RUNNER_TEMP/v201" rev-parse HEAD
+          # The node's own `rust-toolchain.toml` names its compiler, and rustup
+          # honours it inside that directory. It is not this crate's toolchain,
+          # and nothing here is modified: an unmodified server is the gate.
+          # `--bin` skips dev-dependencies, which is how the build avoids the
+          # node's benchmark-only C toolchain requirements.
+          cargo build --quiet --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" \
+            --release --locked --bin rust-reality
+
+      - name: Run the ignored interop and fault suites against it
+        run: |
+          INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+            bash scripts/interop/upstream-server.sh \
+            > "$RUNNER_TEMP/node.log" 2>&1 &
+          node=$!
+          trap 'kill "$node" 2>/dev/null || true' EXIT INT TERM
+          for _ in $(seq 1 120); do
+            [[ -s target/interop/handoff.env ]] && break
+            sleep 0.5
+          done
+          if [[ ! -s target/interop/handoff.env ]]; then
+            echo "the node never published its handoff" >&2
+            cat "$RUNNER_TEMP/node.log" >&2
+            exit 1
+          fi
+          set -a
+          . target/interop/handoff.env
+          set +a
+          # The fixture writes the address a Windows host would use to reach a
+          # WSL guest. Client and node share one machine here, so loopback is
+          # both the honest address and the one that does not depend on the
+          # runner's own interface.
+          export RRC_INTEROP_ADDR="$RRC_INTEROP_LOOPBACK"
+          export RRC_SOAK_SECONDS=30
+          cargo test --locked --test interop_v201 -- --ignored --test-threads=1
+
+      - name: Node log
+        if: failure()
+        run: cat "$RUNNER_TEMP/node.log" || true
+
+  artifacts:
+    name: Linux artifacts (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    needs: [lint, test, msrv, interop]
+    # An artifact exists to be shipped, so it is built for a tag or on demand
+    # rather than for every commit on main.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-gnu
+            target: x86_64-unknown-linux-gnu
+            packages: ""
+            linker: ""
+          - name: x86_64-musl
+            target: x86_64-unknown-linux-musl
+            packages: musl-tools
+            linker: ""
+          - name: aarch64-gnu
+            target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Add ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          if [[ -n "$PACKAGES" ]]; then
+            sudo apt-get update
+            # shellcheck disable=SC2086 # a matrix word list, meant to split
+            sudo apt-get install -y $PACKAGES
+          fi
+          rustup target add "$TARGET"
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          LINKER: ${{ matrix.linker }}
+        run: |
+          args=(build --release --locked "--target=$TARGET")
+          if [[ -n "$LINKER" ]]; then
+            args+=("--config=target.$TARGET.linker=\"$LINKER\"")
+          fi
+          cargo "${args[@]}"
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          NAME: ${{ matrix.name }}
+        run: |
+          version="$(git describe --tags --always)"
+          bundle="rust-reality-client-${version}-${NAME}"
+          staged="$RUNNER_TEMP/stage/$bundle"
+          mkdir -p "$staged"
+          cp "target/$TARGET/release/rust-reality-client" "$staged/"
+          cp README.md examples/client.toml "$staged/"
+          printf '%s\n' "$version" > "$staged/VERSION"
+          # Sorted, zeroned ownership and `gzip -n` keep the archive a function
+          # of its inputs: two builds of one commit should hash the same, which
+          # is the only way a published checksum means anything.
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -cf - -C "$RUNNER_TEMP/stage" "$bundle" | gzip -n > "$bundle.tar.gz"
+          ls -l "$bundle.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-reality-client-${{ matrix.name }}
+          path: ${{ github.workspace }}/rust-reality-client-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  checksums:
+    name: SHA-256 for every artifact
+    runs-on: ubuntu-24.04
+    needs: artifacts
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-reality-client-x86_64-gnu
+          path: staged
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-reality-client-x86_64-musl
+          path: staged
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-reality-client-aarch64-gnu
+          path: staged
+      - name: Hash and verify
+        run: |
+          cd staged
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          # The check is the artifact's usefulness: a sum nobody re-computes is
+          # a line of text, not a way to tell a good download from a tampered one.
+          sha256sum --check --strict SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-reality-client-SHA256SUMS
+          path: staged/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
