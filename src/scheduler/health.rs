@@ -126,6 +126,10 @@ pub struct Health {
     failures: AtomicU64,
     /// Probes run.
     probes: AtomicU64,
+    /// Times this node was started as the second candidate.
+    hedges: AtomicU64,
+    /// Times the tunnel this node opened was the one adopted.
+    hedge_wins: AtomicU64,
     /// Races this node was still fighting in when another node won them.
     hedge_losses: AtomicU8,
     /// The last fault's family, as a code. `0` is "none".
@@ -149,6 +153,8 @@ impl Health {
             successes: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             probes: AtomicU64::new(0),
+            hedges: AtomicU64::new(0),
+            hedge_wins: AtomicU64::new(0),
             hedge_losses: AtomicU8::new(0),
             last_fault: AtomicU8::new(0),
         }
@@ -273,6 +279,20 @@ impl Health {
         self.trip(now_ms, failure, policy);
     }
 
+    /// Notes that this node was started as the second candidate for a connection.
+    ///
+    /// Counted where the attempt is made rather than where it settles, because the
+    /// question this answers — how often a hedge is run and how often it pays — has a
+    /// denominator of authentications spent, and an abandoned candidate still spent one.
+    pub fn hedge_started(&self) {
+        self.hedges.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Notes that the tunnel this node opened was adopted over the leader's.
+    pub fn hedge_won(&self) {
+        self.hedge_wins.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Notes that this node was still in flight when another node won the race.
     ///
     /// Returns the consecutive count, which is all a cancellation proves: this node
@@ -301,6 +321,8 @@ impl Health {
             successes: self.successes.load(Ordering::Acquire),
             failures: self.failures.load(Ordering::Acquire),
             probes: self.probes.load(Ordering::Acquire),
+            hedges: self.hedges.load(Ordering::Acquire),
+            hedge_wins: self.hedge_wins.load(Ordering::Acquire),
             strikes: self.strikes.load(Ordering::Acquire),
             trips: self.trips.load(Ordering::Acquire),
             hedge_losses: self.hedge_losses.load(Ordering::Acquire),
@@ -409,6 +431,14 @@ pub struct Snapshot {
     pub failures: u64,
     /// Probes run.
     pub probes: u64,
+    /// Times this node was started as the second candidate for a connection.
+    pub hedges: u64,
+    /// Times the tunnel this node opened won the race against the leader.
+    ///
+    /// `hedge_wins` over `hedges` is the rate a hedge is worth anything at. A low rate
+    /// on a busy process means second candidates are being authenticated to keep a
+    /// leader company, which is what the delay floor is for.
+    pub hedge_wins: u64,
     /// Faults toward the next trip.
     pub strikes: u8,
     /// Trips since the last opened tunnel.

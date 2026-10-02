@@ -619,6 +619,12 @@ async fn a_lead_that_refuses_fails_over_at_once() {
     assert_eq!(report[0].health.last_failure, Some(Failure::Rejected));
     assert_eq!(report[1].health.successes, 1);
     assert_eq!(
+        report[1].health.hedges, 0,
+        "a challenger started after the leader answered \"no\" is a failover, and \
+         counting it as a hedge would make the win rate a number about nothing"
+    );
+    assert_eq!(report[1].health.hedge_wins, 0);
+    assert_eq!(
         crowd.widest(ATTEMPTS),
         1,
         "the challenger was started after the leader settled, not alongside it"
@@ -651,6 +657,16 @@ async fn a_late_lead_is_replaced_by_its_challenger() {
     );
     assert_eq!(report[0].health.hedge_losses, 1);
     assert_eq!(report[1].health.successes, 1);
+    assert_eq!(
+        report[1].health.hedges, 1,
+        "the challenger was started as a hedge, over a leader still running"
+    );
+    assert_eq!(
+        report[1].health.hedge_wins, 1,
+        "and it is the candidate this connection adopted"
+    );
+    assert_eq!(report[0].health.hedges, 0);
+    assert_eq!(report[0].health.hedge_wins, 0);
 }
 
 #[tokio::test(start_paused = true)]

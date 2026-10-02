@@ -711,6 +711,13 @@ impl<E: Node> Scheduler<E> {
                 None => lead_attempt.await,
             };
         };
+        // A candidate started while the leader is still running is a hedge; one started
+        // after the leader settled is the cheapest failover there is. `hedges` counts
+        // only the first, because a rate over both would answer no question at all.
+        let raced = lead_error.is_none();
+        if raced {
+            self.shared.health[trail].hedge_started();
+        }
         let mut trail_attempt = self.attempt(trail, destination, port);
         let mut trail_pending = true;
         let mut trail_error = None;
@@ -733,6 +740,9 @@ impl<E: Node> Scheduler<E> {
                     Ok(established) => {
                         // The leader is dropped here, and never settles: the only thing
                         // this can honestly record is that it was still behind.
+                        if raced {
+                            self.shared.health[trail].hedge_won();
+                        }
                         self.lost_race(lead, trail);
                         return Ok(established);
                     }
