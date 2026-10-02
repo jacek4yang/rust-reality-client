@@ -13,6 +13,7 @@
 //! | Handoff | `handoff` | one node, one authenticated tunnel |
 //! | Connect | `transport` | TCP, keepalive, half-close, relay |
 //! | Edge | `inbound` | SOCKS5 and HTTP CONNECT |
+//! | Process | `serve` | listeners, accounting, shutdown |
 //! | Host | `config`, `logging`, `error` | validation, redaction, failure taxonomy |
 //!
 //! See [`error`] for the failure taxonomy that keeps these layers honest about
@@ -45,6 +46,8 @@ pub mod entropy;
 pub mod error;
 pub mod handoff;
 pub mod inbound;
+pub mod logging;
 pub mod protocol;
 pub mod scheduler;
+pub mod serve;
 pub mod transport;

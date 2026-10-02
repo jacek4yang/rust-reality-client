@@ -121,6 +121,26 @@ impl Failure {
     }
 }
 
+/// The family's own word, for a log field and for `explain`.
+///
+/// A failure is scored by family rather than by message, so the family is the part
+/// an operator has to be able to grep: `family:"local"` says the node did nothing
+/// wrong, which is the single most useful thing a line about a failed connection
+/// can say.
+impl fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Local => "local",
+            Self::Dns => "dns",
+            Self::Connect => "connect",
+            Self::Timeout => "timeout",
+            Self::Handshake => "handshake",
+            Self::Rejected => "rejected",
+            Self::Idle => "idle",
+        })
+    }
+}
+
 /// DNS outcome categories.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DnsError {
