@@ -1,0 +1,92 @@
+# rust-reality-client, client.toml
+#
+# One file, two kinds of line: the ones the client reads, and the comments that
+# say what each value has to be. Nothing here is a default you should keep —
+# every placeholder is chosen so that `check` accepts the file and `doctor`
+# refuses to pretend the node is reachable.
+#
+# Fill in a real node with:
+#
+#     rust-reality-client generate --out client.toml
+#
+# which writes this same file with a fresh user id, then paste the four REALITY
+# values from the server's own `reality` output. Do not hand-edit the user id:
+# `generate` draws one from the operating system's entropy source.
+#
+# Field names follow the server, not an Xray share link. An Xray link's
+# `pbk`/`sni`/`sid`/`id`/`fp`/`flow` are refused by name with a pointer to the
+# key that means the same thing here, and `fp` has no equivalent: v2.0.1 never
+# inspects a fingerprint, and this client sends its own ClientHello shape.
+
+[listen]
+# Loopback only. A proxy that selects nodes and holds credentials is not a
+# service other machines should be able to use: on a shared host, an open relay
+# attributes someone else's traffic to this user id.
+socks5 = "127.0.0.1:10808"
+http = "127.0.0.1:10809"
+# Either entry may be "" to disable that inbound on its own.
+#
+# Set this to true only when you have decided who else may use this proxy.
+# It is the one way to bind a non-loopback address, and it is deliberately not
+# the default:
+# allowRemote = false
+
+# ---------------------------------------------------------------------------
+# The node. Copy the [[node]] block to add another; the client picks between
+# them and never fans out to all of them at once.
+# ---------------------------------------------------------------------------
+
+[[node]]
+# Any label. It appears in logs and in `doctor` output, so make it the name of
+# the place, not of the protocol.
+name = "home-entry"
+
+# The server's host name or IP literal, with no port and no scheme. The port is
+# its own field, which is why a pasted "example.com:443" is refused.
+address = "www.example.com"
+
+# The entry listener port: 443 on a server that shares the port with a real
+# HTTPS site, or the dedicated port the server's `[[inbounds]]` says.
+port = 443
+
+# The user id `generate` wrote. It is credential material: it never reaches a
+# log line, a `Debug` rendering or an error message.
+userId = "00000000-0000-4000-8000-000000000000"
+
+[node.reality]
+# The server's X25519 public key: URL-safe unpadded base64, 43 characters,
+# decoding to exactly 32 bytes. Padded input, the standard alphabet's `+` and
+# `/`, and embedded whitespace are all refused, because a key that decodes
+# "close enough" authenticates nothing and REALITY answers that by going quiet.
+#
+# These 43 A's are the template's placeholder and decode to 32 zero bytes.
+# `doctor` fails on them by name. Replace the whole string.
+publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+# Hex, 2 to 16 characters, an even number of them. This selects a user on a
+# server that may host several, so it is credential material too: diagnostics
+# report its length and never its value.
+shortId = "abcd"
+
+# Sent as the SNI and matched case-insensitively by the server, which compares
+# it against its own `serverNames` list. One concrete ASCII DNS name: an IP
+# literal, a wildcard or a non-ASCII name is relayed to the cover rather than
+# rejected, so it looks like a dead node instead of a wrong setting.
+serverName = "www.example.com"
+
+# ---------------------------------------------------------------------------
+# A second node, for the shape of a list. `rust-reality-client check` reports
+# two entries that are the same server *and* the same user, because that list
+# offers no redundancy: one failure is both failures.
+# ---------------------------------------------------------------------------
+#
+# [[node]]
+# name = "backup-entry"
+# address = "backup.example.org"
+# port = 8443
+# userId = "00000000-0000-4000-8000-000000000000"
+#
+# [node.reality]
+# publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+# shortId = "1234"
+# serverName = "www.example.com"
