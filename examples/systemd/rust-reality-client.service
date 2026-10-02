@@ -1,0 +1,94 @@
+# A hardened unit for one long-running client process.
+#
+# Install:
+#
+#   sudo install -m 0755 target/release/rust-reality-client /usr/local/bin/
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin rust-reality-client
+#   sudo mkdir -p /etc/rust-reality-client
+#   sudo rust-reality-client generate --out /etc/rust-reality-client/client.toml
+#   sudo chmod 0640 /etc/rust-reality-client/client.toml
+#   sudo chown root:rust-reality-client /etc/rust-reality-client/client.toml
+#   sudo cp examples/systemd/rust-reality-client.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rust-reality-client
+#
+# The file the unit reads holds a node's user id, which is an authentication
+# credential: 0640 with the service group is what lets an unprivileged process
+# hold it without any other account on the machine being able to read it.
+#
+# Both listeners stay on loopback, as the configuration grammar requires them to
+# unless `allowRemote` is set deliberately. Nothing here opens a port to a
+# network the operator did not ask for.
+
+[Unit]
+Description=rust-reality-client (VLESS + REALITY + Vision, SOCKS5 and HTTP CONNECT)
+Documentation=https://github.com/jacek4yang/rust-reality-client
+Wants=network-online.target
+After=network-online.target
+
+StartLimitIntervalSec=0
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+User=rust-reality-client
+Group=rust-reality-client
+ExecStart=/usr/local/bin/rust-reality-client run \
+  --config /etc/rust-reality-client/client.toml \
+  --log-level info
+
+SyslogIdentifier=rust-reality-client
+StandardOutput=journal
+StandardError=journal
+
+# One restart policy with a floor: a node that is down is a reason to try again
+# in a second, and a repeated crash loop must not become a CPU spinner.
+Restart=on-failure
+RestartSec=2s
+
+# The process winds its own connections down for ten seconds after SIGTERM,
+# which is the graceful path. Fifteen gives that path room without letting a
+# stuck connection hold a shutdown hostage.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+TimeoutStartSec=30
+
+# 256 local connections, each of which can hold one local and one remote socket,
+# plus the listeners and the probes. Four thousand is room to spare rather than a
+# limit anyone is expected to reach.
+LimitNOFILE=4096
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# This client speaks TCP to its nodes, TCP or UDP to a resolver through the C
+# library, and nothing else. A proxy that suddenly opens AF_PACKET or AF_BLUETOOTH
+# is not having a normal day. Add AF_NETLINK here if a name service on the host
+# needs it; do not replace this list with `restrict=address` and no families.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# No capability survives, and none is asked for: binding a port above 1024 needs
+# neither, and this process is not supposed to hold the others.
+CapabilityBoundingSet=
+AmbientCapabilities=
