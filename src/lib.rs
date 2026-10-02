@@ -46,4 +46,5 @@ pub mod error;
 pub mod handoff;
 pub mod inbound;
 pub mod protocol;
+pub mod scheduler;
 pub mod transport;
