@@ -168,6 +168,47 @@ impl Handoff {
         })
     }
 
+    /// Reaches the node and authenticates the TLS layer, without asking it to
+    /// connect anywhere.
+    ///
+    /// This is what an active probe costs: a resolved dial, one `ClientHello`, and
+    /// the server's first flight — then the socket closes without a VLESS request,
+    /// so the node is never asked to reach a destination on our behalf. Anything
+    /// cheaper (a bare TCP connect) proves only that something answers the port,
+    /// which is not the question a cooling node raises; anything fuller (a real
+    /// request) makes the probe a connection, and a probe that is a connection is
+    /// just traffic with an extra step.
+    ///
+    /// What it proves and what it does not: a success means the address is
+    /// reachable, the cover is intact, and this node's public key and short ID were
+    /// accepted, because the server's verified finish is derived from that
+    /// authentication. It says nothing about the user id, which travels only in the
+    /// VLESS request, so a refusal that came from credentials is not cleared by a
+    /// probe — see [`crate::scheduler::Fault::clears_on_probe`].
+    ///
+    /// Each probe is a fresh [`ClientKeyAgreement`], so no `client_random` and no
+    /// key share is repeated on the wire. Nothing above this is reused: the socket
+    /// is dropped here, which closes it, and the peer sees a connection that ended
+    /// after the handshake — the same shape as a browser pool closing an idle
+    /// keep-alive connection.
+    ///
+    /// # Errors
+    ///
+    /// The same taxonomy as [`Handoff::establish`], minus the request stage: dial
+    /// failures from the resolution and racing, handshake and silence failures from
+    /// authentication.
+    pub async fn probe(&self) -> Result<Duration, Error> {
+        let started = Instant::now();
+        let Dialed {
+            value: mut stream, ..
+        } = self.dial_node().await?;
+        self.authenticate(&mut stream).await?;
+        // The dial layer has already folded the connect into the family's beliefs;
+        // all that is left to report is how long the whole exchange took, which is
+        // the number the scheduler folds into the node's.
+        Ok(started.elapsed())
+    }
+
     /// Resolves this node and races its candidates, mapping the dial layer's own
     /// error type into the crate taxonomy.
     async fn dial_node(&self) -> Result<Dialed<TcpStream>, Error> {
@@ -241,10 +282,14 @@ impl Handoff {
 /// wins by 200 ms of connect time and one that wins by 200 ms of handshake time are
 /// different problems, and the scheduler's hysteresis has to know which one it is
 /// smoothing.
+///
+/// The session is a parameter so that the layer above can be tested against a pipe
+/// instead of against a server: nothing outside [`crate::scheduler`] names the
+/// argument, and the spelling `Established` used everywhere else is the real tunnel.
 #[derive(Debug)]
-pub struct Established {
+pub struct Established<S = VisionSession<TcpStream>> {
     /// The live tunnel. Dropping it closes the path.
-    pub session: VisionSession<TcpStream>,
+    pub session: S,
     /// The address that answered, which the resolver may have reordered and the race
     /// may have chosen over a faster-ordered candidate.
     pub address: SocketAddr,

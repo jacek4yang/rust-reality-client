@@ -315,7 +315,9 @@ pub enum Limit {
     Handshakes,
     /// Too many concurrent active probes.
     Probes,
-    /// Too many concurrent remote candidates for one logical connection.
+    /// Nothing may be attempted for this connection right now: every configured
+    /// node is inside its breaker window, and the one recovery attempt a cooling
+    /// node is allowed is already in flight.
     Candidates,
 }
 
@@ -325,7 +327,7 @@ impl fmt::Display for Limit {
             Self::LocalConnections => formatter.write_str("local connection limit"),
             Self::Handshakes => formatter.write_str("handshake concurrency limit"),
             Self::Probes => formatter.write_str("probe concurrency limit"),
-            Self::Candidates => formatter.write_str("candidate concurrency limit"),
+            Self::Candidates => formatter.write_str("no candidate may be tried right now"),
         }
     }
 }
