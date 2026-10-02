@@ -98,6 +98,27 @@ impl Handshake {
     }
 }
 
+#[cfg(test)]
+impl Handshake {
+    /// Assembles a completed handshake from two record directions.
+    ///
+    /// Production code reaches a `Handshake` only through [`complete`], which is
+    /// the only place its keys are derived. A test above the handshake needs the
+    /// same *type* — to drive a session against a peer that is just a key
+    /// schedule — without standing up a whole REALITY server.
+    pub(crate) fn from_record_layers(
+        negotiated: Negotiated,
+        server_records: RecordLayer,
+        client_records: RecordLayer,
+    ) -> Self {
+        Self {
+            negotiated,
+            server_records,
+            client_records,
+        }
+    }
+}
+
 impl fmt::Debug for Handshake {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -923,12 +944,18 @@ mod tests {
         let node = Node::new();
         let (hello, keys, auth_key) = client_start(&node);
         let (mut wire, _) = build_flight(&node, &hello, &keys, &auth_key, None, false);
-        // The session ID starts at the ServerHello body's 35th byte: 5 header
-        // bytes, then type, length, legacy version and random.
-        wire[5 + 4 + 2 + 32 + 1] = 16;
+        // The session ID begins after 5 record-header bytes, 4 handshake-header
+        // bytes, the legacy version and the random field, plus the one length byte
+        // that precedes it. A bit flip, not an assignment: the ID is the
+        // authenticator, so writing a fixed byte would be a no-op in about one run
+        // in 256 that already carried it, and the client would accept the hello.
+        wire[5 + 4 + 2 + 32 + 1] ^= 0x80;
         let error = refused_by(&wire, &hello, &keys, &auth_key).await;
         assert!(
-            matches!(error, Error::Handshake(HandshakeError::Protocol(_))),
+            matches!(
+                error,
+                Error::Handshake(HandshakeError::Protocol("server hello session id"))
+            ),
             "{error}"
         );
     }

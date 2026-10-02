@@ -19,6 +19,9 @@ pub enum Error {
     Handshake(HandshakeError),
     /// The server accepted the TLS layer but rejected the VLESS request.
     Rejected(RejectReason),
+    /// An established session stopped carrying data in a way the taxonomy
+    /// recognises: see [`SessionError`].
+    Session(SessionError),
     /// A local limit (connections, handshakes, probes, buffer) was reached.
     Limit(Limit),
     /// The attempt was cancelled by the caller, not by the network.
@@ -36,15 +39,33 @@ impl Error {
     #[must_use]
     pub fn classify(&self) -> Failure {
         match self {
-            Self::Config(_) | Self::Limit(_) | Self::Cancelled | Self::Dns(DnsError::NoAddress) => {
-                Failure::Local
-            }
+            // Nothing was learned about the node: configuration and limits are
+            // local policy, a name with no address never reached one, a
+            // cancelled attempt was stopped by us rather than by a peer, and a
+            // request that could not be encoded or padded sent no byte at all.
+            Self::Config(_)
+            | Self::Limit(_)
+            | Self::Cancelled
+            | Self::Dns(DnsError::NoAddress)
+            | Self::Session(SessionError::RequestTooLong | SessionError::Entropy) => Failure::Local,
             Self::Dns(_) => Failure::Dns,
-            Self::Transport(TransportError::BrokenPipe) => Failure::Idle,
+            Self::Transport(TransportError::BrokenPipe | TransportError::Socket(_))
+            | Self::Session(
+                SessionError::RecordCorrupted
+                | SessionError::KeyExhausted
+                | SessionError::Framing(_)
+                | SessionError::UnexpectedContentType(_)
+                | SessionError::PeerAlert { .. },
+            ) => Failure::Idle,
             Self::Transport(_) | Self::Io(_) => Failure::Connect,
             Self::Handshake(HandshakeError::Timeout) => Failure::Timeout,
             Self::Handshake(_) => Failure::Handshake,
-            Self::Rejected(_) => Failure::Rejected,
+            // A refusal is the node's answer; a node that completes TLS and then
+            // drops the session without answering proved it is not serving
+            // *this* request. Both are what the Rejected family scores.
+            Self::Rejected(_) | Self::Session(SessionError::ClosedBeforeResponse) => {
+                Failure::Rejected
+            }
         }
     }
 }
@@ -57,6 +78,7 @@ impl fmt::Display for Error {
             Self::Transport(error) => write!(formatter, "transport error: {error}"),
             Self::Handshake(error) => write!(formatter, "handshake error: {error}"),
             Self::Rejected(reason) => write!(formatter, "request rejected: {reason}"),
+            Self::Session(error) => write!(formatter, "session error: {error}"),
             Self::Limit(limit) => write!(formatter, "local limit reached: {limit}"),
             Self::Cancelled => formatter.write_str("operation cancelled"),
             Self::Io(message) => write!(formatter, "i/o error: {message}"),
@@ -127,6 +149,10 @@ pub enum TransportError {
     Timeout,
     /// An established socket broke while carrying a session.
     BrokenPipe,
+    /// An established socket failed a system call, with the operating system's
+    /// own message. Only a live tunnel reports this: reaching a node at all is
+    /// [`Self::Connect`].
+    Socket(String),
 }
 
 impl fmt::Display for TransportError {
@@ -135,6 +161,7 @@ impl fmt::Display for TransportError {
             Self::Connect(message) => write!(formatter, "connect failed: {message}"),
             Self::Timeout => formatter.write_str("connect timed out"),
             Self::BrokenPipe => formatter.write_str("connection broken"),
+            Self::Socket(message) => write!(formatter, "socket error: {message}"),
         }
     }
 }
@@ -194,6 +221,77 @@ impl fmt::Display for RejectReason {
         }
     }
 }
+
+/// What ended or corrupted a session that had already completed its handshake.
+///
+/// These are reported apart from [`HandshakeError`] because the node is already
+/// authenticated by then: the question is no longer "is this our server" but
+/// "did this tunnel stay up", which the scheduler scores differently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionError {
+    /// The peer closed the connection before answering the VLESS request.
+    ///
+    /// A node that completes TLS and then drops the session without replying is
+    /// either refusing these credentials or broken; both are reported apart from
+    /// a handshake failure, and neither is claimed to be the other.
+    ClosedBeforeResponse,
+    /// The VLESS request could not be encoded, because a destination field was
+    /// longer than its one-byte wire length.
+    ///
+    /// This is a property of the target, not of the node: no byte was sent.
+    RequestTooLong,
+    /// An encrypted record arrived that would not open under the session keys.
+    ///
+    /// On a live tunnel this means the stream was corrupted or desynchronised.
+    RecordCorrupted,
+    /// The traffic key reached its per-record ceiling.
+    ///
+    /// AES-GCM allows `2^24` records under one key, which a long bulk transfer
+    /// can reach. Sealing further records would repeat a nonce, so the tunnel is
+    /// ended instead.
+    KeyExhausted,
+    /// Vision framing could not be decoded.
+    Framing(&'static str),
+    /// Operating-system entropy was unavailable, so a frame could not be padded.
+    ///
+    /// Padding lengths are drawn per frame, so this can surface long after a
+    /// session started. It is reported apart from a framing error because the
+    /// peer did nothing wrong.
+    Entropy,
+    /// A TLS record type that cannot appear in a completed session arrived.
+    UnexpectedContentType(u8),
+    /// The peer sent an alert that is not an orderly `close_notify`.
+    PeerAlert {
+        /// Alert level, 1 warning or 2 fatal.
+        level: u8,
+        /// Alert description.
+        description: u8,
+    },
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClosedBeforeResponse => {
+                formatter.write_str("peer closed before answering the request")
+            }
+            Self::RequestTooLong => formatter.write_str("destination does not fit the wire format"),
+            Self::RecordCorrupted => formatter.write_str("session record did not open"),
+            Self::KeyExhausted => formatter.write_str("session traffic key exhausted"),
+            Self::Framing(reason) => write!(formatter, "vision framing error: {reason}"),
+            Self::Entropy => formatter.write_str("operating-system entropy unavailable"),
+            Self::UnexpectedContentType(value) => {
+                write!(formatter, "record type {value} cannot carry session data")
+            }
+            Self::PeerAlert { level, description } => write!(
+                formatter,
+                "peer alert level {level} description {description}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
 
 /// Local resource limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

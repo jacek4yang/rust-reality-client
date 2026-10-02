@@ -596,8 +596,10 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    /// The one-byte value this content type carries, either in a plaintext
+    /// record header or as a TLS 1.3 record's inner type.
     #[must_use]
-    const fn wire_value(self) -> u8 {
+    pub const fn wire_value(self) -> u8 {
         match self {
             Self::ChangeCipherSpec => 20,
             Self::Alert => 21,
@@ -658,13 +660,18 @@ impl From<RecordError> for crate::error::Error {
 /// Maximum plaintext bytes in one record.
 pub const MAX_PLAINTEXT_LEN: usize = 1 << 14;
 
-const HEADER_LEN: usize = 5;
+/// Size of a TLS record header: type, legacy version, encrypted-body length.
+pub const RECORD_HEADER_LEN: usize = 5;
+
 const TAG_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const OUTER_APPLICATION_DATA: u8 = 23;
 const MAX_INNER_PLAINTEXT_LEN: usize = MAX_PLAINTEXT_LEN + 1;
 const MIN_ENCRYPTED_BODY_LEN: usize = TAG_LEN + 1;
 const MAX_ENCRYPTED_BODY_LEN: usize = MAX_INNER_PLAINTEXT_LEN + TAG_LEN;
+/// Wire size of the largest record TLS 1.3 allows. A reader that bounds its
+/// buffer by this value can always hold one whole record.
+pub const MAX_RECORD_WIRE_LEN: usize = RECORD_HEADER_LEN + MAX_ENCRYPTED_BODY_LEN;
 const AES_GCM_RECORD_LIMIT: u64 = 1 << 24;
 
 enum RecordCipher {
@@ -798,7 +805,7 @@ impl RecordLayer {
     /// Wire size of one sealed record carrying `plaintext_len` payload bytes.
     #[must_use]
     pub const fn record_wire_len(plaintext_len: usize) -> usize {
-        HEADER_LEN + plaintext_len + 1 + TAG_LEN
+        RECORD_HEADER_LEN + plaintext_len + 1 + TAG_LEN
     }
 
     /// Largest payload that still fits one record.
@@ -867,12 +874,12 @@ impl RecordLayer {
             ciphertext_len.to_be_bytes()[1],
         ];
         let start = output.len();
-        output.reserve_exact(usize::from(ciphertext_len) + HEADER_LEN);
+        output.reserve_exact(usize::from(ciphertext_len) + RECORD_HEADER_LEN);
         output.extend_from_slice(&header);
         output.extend_from_slice(plaintext);
         output.push(content_type.wire_value());
-        output.resize(start + HEADER_LEN + inner_len, 0);
-        let body = &mut output[start + HEADER_LEN..];
+        output.resize(start + RECORD_HEADER_LEN + inner_len, 0);
+        let body = &mut output[start + RECORD_HEADER_LEN..];
         let nonce = self.nonce();
         let tag = self.cipher.seal(&nonce, &header, body)?;
         output.extend_from_slice(&tag);
@@ -883,6 +890,34 @@ impl RecordLayer {
     #[must_use]
     pub const fn encrypted_body_len(plaintext_len: usize) -> usize {
         plaintext_len + 1 + TAG_LEN
+    }
+
+    /// Total wire length of the record that `header` declares, or `None` while
+    /// fewer than [`RECORD_HEADER_LEN`] bytes have arrived.
+    ///
+    /// A stream reader needs this before it can wait for the rest of a record,
+    /// and it must not invent its own bounds: a header is accepted here exactly
+    /// when [`Self::open`] would accept it. That is what lets a tunnel report a
+    /// desynchronised peer at the header, instead of waiting forever for bytes
+    /// that will never complete or mistaking the defect for a bad tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordError::InvalidHeader`] for an outer type or version that
+    /// carries no encrypted record, and [`RecordError::InvalidLength`] for a
+    /// declared body outside the bounds one record can hold.
+    pub fn record_len(header: &[u8]) -> Result<Option<usize>, RecordError> {
+        if header.len() < RECORD_HEADER_LEN {
+            return Ok(None);
+        }
+        if header[0] != OUTER_APPLICATION_DATA || header[1..3] != [3, 3] {
+            return Err(RecordError::InvalidHeader);
+        }
+        let body = usize::from(u16::from_be_bytes([header[3], header[4]]));
+        if !(MIN_ENCRYPTED_BODY_LEN..=MAX_ENCRYPTED_BODY_LEN).contains(&body) {
+            return Err(RecordError::InvalidLength);
+        }
+        Ok(Some(RECORD_HEADER_LEN + body))
     }
 
     /// Opens one complete record in place, returning its plaintext.
@@ -899,10 +934,10 @@ impl RecordLayer {
         record: &'record mut [u8],
     ) -> Result<(ContentType, &'record [u8]), RecordError> {
         self.ensure_available()?;
-        if record.len() < HEADER_LEN {
+        if record.len() < RECORD_HEADER_LEN {
             return Err(RecordError::Incomplete);
         }
-        let header: [u8; HEADER_LEN] = record[..HEADER_LEN]
+        let header: [u8; RECORD_HEADER_LEN] = record[..RECORD_HEADER_LEN]
             .try_into()
             .map_err(|_| RecordError::InvalidLength)?;
         if header[0] != OUTER_APPLICATION_DATA || header[1..3] != [3, 3] {
@@ -912,11 +947,11 @@ impl RecordLayer {
         if !(MIN_ENCRYPTED_BODY_LEN..=MAX_ENCRYPTED_BODY_LEN).contains(&ciphertext_len) {
             return Err(RecordError::InvalidLength);
         }
-        let expected = HEADER_LEN + ciphertext_len;
+        let expected = RECORD_HEADER_LEN + ciphertext_len;
         if record.len() < expected {
             return Err(RecordError::Incomplete);
         }
-        let body = &mut record[HEADER_LEN..expected];
+        let body = &mut record[RECORD_HEADER_LEN..expected];
         let nonce = self.nonce();
         self.cipher.open(&nonce, &header, body)?;
         self.advance()?;
@@ -981,8 +1016,8 @@ impl std::fmt::Debug for RecordLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplicationSecrets, CipherSuite, ContentType, HashAlgorithm, KeySchedule, RecordLayer,
-        TranscriptHash, TranscriptHasher,
+        ApplicationSecrets, CipherSuite, ContentType, HashAlgorithm, KeySchedule,
+        MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN, RecordLayer, TranscriptHash, TranscriptHasher,
     };
 
     /// Decodes lowercase hex, ignoring the line continuations used in long
@@ -1194,6 +1229,66 @@ mod tests {
                 .open(&mut truncated)
                 .is_err_and(|error| { error == super::RecordError::Incomplete })
         );
+    }
+
+    /// A tunnel waits on `record_len` before it calls `open`, so the two must
+    /// agree: the total `record_len` promises is the record `open` then accepts,
+    /// and a header `record_len` refuses is one `open` refuses for the same
+    /// reason. That is what lets a session name a desynchronised peer at the
+    /// header instead of waiting forever for bytes that can never complete, or
+    /// mistaking the defect for a bad tag.
+    #[test]
+    fn record_len_promises_exactly_what_open_accepts() {
+        let suite = CipherSuite::Aes256GcmSha384;
+        let transcript = suite.hash().digest(b"flight");
+        let schedule = KeySchedule::new(suite, &[9; 48], &transcript).expect("schedule");
+        let keys = schedule
+            .traffic_keys(schedule.server_handshake_secret())
+            .expect("keys");
+        let (mut writer, mut reader) = (
+            RecordLayer::new(suite, &keys).expect("writer"),
+            RecordLayer::new(suite, &keys).expect("reader"),
+        );
+        for plaintext_len in [0_usize, 2, 1_000, MAX_PLAINTEXT_LEN] {
+            let mut out = Vec::new();
+            writer
+                .seal(
+                    ContentType::ApplicationData,
+                    &vec![7_u8; plaintext_len],
+                    &mut out,
+                )
+                .expect("seal");
+            assert_eq!(RecordLayer::record_len(&out), Ok(Some(out.len())));
+            for prefix in RECORD_HEADER_LEN..out.len() {
+                assert_eq!(
+                    RecordLayer::record_len(&out[..prefix]),
+                    Ok(Some(out.len())),
+                    "a partial buffer declares the same total"
+                );
+            }
+            for prefix in 0..RECORD_HEADER_LEN {
+                assert_eq!(
+                    RecordLayer::record_len(&out[..prefix]),
+                    Ok(None),
+                    "no header is nothing to wait for"
+                );
+            }
+            let (kind, opened) = reader.open(&mut out).expect("the promised record opens");
+            assert_eq!(kind, ContentType::ApplicationData);
+            assert_eq!(opened.len(), plaintext_len);
+        }
+
+        for header in [
+            vec![22, 3, 3, 0, 17],      // a plaintext handshake record
+            vec![23, 3, 2, 0, 17],      // a legacy version TLS 1.3 never writes
+            vec![23, 3, 3, 0, 16],      // a body too short to hold type plus tag
+            vec![23, 3, 3, 0xff, 0xff], // a body larger than one record can hold
+        ] {
+            let promised = RecordLayer::record_len(&header).expect_err("not a record header");
+            let mut copy = header.clone();
+            let refused = reader.open(&mut copy).expect_err("`open` agrees");
+            assert_eq!(promised, refused, "{header:?}");
+        }
     }
 
     #[test]

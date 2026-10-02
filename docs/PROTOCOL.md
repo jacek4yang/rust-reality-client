@@ -273,11 +273,25 @@ the header in the same record are fed to `VisionDecoder` first
 record plaintext = vless request header || vision frames...
 ```
 
+This client always writes exactly one empty long-padded `Continue` frame behind
+the header, which is Xray's own camouflage path: its outbound logs "Insert
+padding with empty content to camouflage VLESS header" and writes an empty frame
+when no first payload has arrived to coalesce with
+(`.upstream/xray/outbound.go:343-349`). The server accepts either — it parses the
+request off the front of the concatenated plaintext and hands the remainder to the
+decoder — so the choice is purely a length-profile one: a bare request would make
+the first record's size a protocol fingerprint, while the padded frame lands in
+the same 900-to-1400-byte content band the downlink preamble uses.
+
 ### Downlink layout the server produces
 
-`src/server/vision.rs:1336-1360` — response header, then an empty Vision
-preamble frame (`plan(0, Continue, long_padding = true)`, UUID prefixed), then
-content frames.
+`src/server/vision.rs:1336-1361` — the VLESS response header and the opening
+Vision frame are assembled *once, inside one AEAD plaintext*: `plan(0, Continue,
+long_padding = true)` sized with `checked_add` onto `response_header.len()`, then
+`write_assembled` splits the destination at the response length, copies the
+header and assembles the empty frame behind it. So the client's first record
+after handshake carries `[0, 0]` and a padded empty `Continue` frame together,
+and framing begins at plaintext byte 2.
 
 ### Continue / End / Direct decision
 
@@ -302,6 +316,47 @@ Invariants this repository pins by test and this client must preserve: every
 plaintext byte before a `Direct` frame is delivered in order, no byte is
 duplicated or reordered at the transition, and post-boundary bytes already
 buffered are drained ahead of the raw relay (`:1192-1207`).
+
+### What the record boundary does not mean
+
+Three facts the session layer depends on, none of which is visible from the
+frame format alone:
+
+- **An empty `ApplicationData` record carries nothing and must still be opened.**
+  The server's uplink loop does `if record.is_empty() { continue; }`
+  (`src/server/vision.rs:1131-1133`), and it sends the fake NewSessionTicket as an
+  ordinary empty record. A client that *skips* such a record without decrypting it
+  desynchronises its own sequence numbers from the server's, so every later record
+  fails its tag. Opening and discarding is the only correct handling.
+- **Frame boundaries and record boundaries are independent.** The server packs up
+  to four frames into one maximum-sized outer record
+  (`MAX_FRAMES_PER_OUTER_RECORD`, `src/server/vision.rs:1426-1489`), whereas
+  *Xray's* client emits one 8 KiB frame per record — the server's own uplink
+  comment says so outright (`:1070-1072`), which is why the server can stage four
+  record payloads per destination write (`UPLINK_STAGE_CAPACITY`, `:1167-1170`).
+  Only the preamble is guaranteed to be exactly one record. A decoder must walk
+  the plaintext **stream**: one that assumes a frame per record misreads a packed
+  downlink, while a sender is free to pack or not.
+- **Half-close is an alert, not a FIN.** `shutdown_tls_writer` seals
+  `[ALERT_LEVEL_WARNING, ALERT_CLOSE_NOTIFY]` (`= [1, 0]`) and only then shuts the
+  transport writer (`src/protocol/reality/tls13/application_io.rs:994-1015`,
+  constants at `:12-13`). The peer matches on the *description alone*: any alert
+  whose description is `0` is an orderly end — flush staged bytes, reset the idle
+  deadline, shut down the destination, settle `Closed`
+  (`src/server/vision.rs:1116-1125`); any other alert settles `Failed`. A bare FIN
+  at the TCP layer is not an orderly Vision end, and an unencrypted alert is not a
+  thing this client may send.
+
+`End` stays inside the framing loop: the server settles the downlink to `Outer` and
+runs `relay_outer_downlink` on the same TLS writer, which seals verbatim records
+until the destination reaches EOF and then sends close_notify
+(`src/server/vision.rs:1403-1410`, `:1842-1872`). `Direct` returns
+`DownlinkStep::Direct` and the caller performs the raw transfer
+(`:1411-1416`); on the uplink the decoder reports `VisionMode::Direct` mid-record
+and the remaining staged bytes are flushed before the handoff (`:1154-1160`). Both
+commands end framing, so the client's decoder treats them identically as a switch
+to raw bytes — a byte that arrives after either is never reinterpreted as a Vision
+header.
 
 ## Liveness
 

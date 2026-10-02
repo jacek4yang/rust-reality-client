@@ -42,3 +42,4 @@ pub mod crypto;
 pub mod entropy;
 pub mod error;
 pub mod protocol;
+pub mod transport;
