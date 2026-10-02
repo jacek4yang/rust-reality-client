@@ -353,9 +353,11 @@ impl Environment {
     ///
     /// v2.0.1 keeps the same hook (`src/network.rs:439-452`), for the same
     /// reason: whether this machine has a usable IPv6 route is not a question a
-    /// test can answer consistently, and it is not the question under test.
+    /// test can answer consistently, and it is not the question under test. The
+    /// dial layer needs it too, because proving that a cancelled candidate is not
+    /// charged as a failure requires a family the test put in charge.
     #[cfg(test)]
-    fn with_routes_and_primary(
+    pub(super) fn with_routes_and_primary(
         mode: DialPolicy,
         ipv4: bool,
         ipv6: bool,
