@@ -12,15 +12,19 @@
 //! ```
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::config;
-use rust_reality_client::error::Failure;
+use rust_reality_client::error::{Error, Failure, SessionError};
 use rust_reality_client::handoff::{Established, FIRST_BYTE_BUDGET, Handoff};
-use rust_reality_client::inbound::Gate;
 use rust_reality_client::inbound::http;
 use rust_reality_client::inbound::socks5::{Outcome, Proxy};
+use rust_reality_client::inbound::{
+    Establish, Establishment, Gate, MAX_CONCURRENT_HANDSHAKES, MAX_LOCAL_CONNECTIONS,
+};
 use rust_reality_client::protocol::reality::{
     AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
     X25519_MLKEM768_GROUP, build_client_hello, complete,
@@ -37,6 +41,24 @@ const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 /// The three TLS 1.3 suites this client offers.
 const OFFERED_SUITES: [u16; 3] = [0x1301, 0x1302, 0x1303];
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A budget for work that includes a real handshake while other connections are
+/// competing for the same node.
+const LIVE_BUDGET: Duration = Duration::from_secs(30);
+/// How long the fixture's `late` destination stays silent, which is the shape of
+/// every slow server this client has to survive rather than a protocol constant.
+const DESTINATION_DELAY: Duration = Duration::from_secs(3);
+/// The earliest a round trip through that destination can honestly finish, less the
+/// slack a measured wall clock is owed.
+const DESTINATION_FLOOR: Duration = DESTINATION_DELAY.saturating_sub(Duration::from_millis(250));
+/// The keepalive idle this client sets, and therefore the quiet an established
+/// tunnel has to outlast before it can be called stable.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+/// The whole burst the `truncate` destination sends before it resets.
+const DESTINATION_BURST: usize = 64 * 1024;
+/// Concurrent local connections the storm test opens through one live node.
+const STORM: usize = 24;
+/// The soak window, unless `RRC_SOAK_SECONDS` says otherwise.
+const DEFAULT_SOAK_SECONDS: u64 = 20;
 
 fn parameter(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -98,11 +120,18 @@ fn user_id() -> [u8; 16] {
 /// dials through its `direct` route, so bytes come back from outside the tunnel
 /// rather than from a fixture inside it.
 fn echo_target() -> (Destination, u16) {
-    let endpoint = parameter("RRC_INTEROP_ECHO");
-    let (host, port) = endpoint.rsplit_once(':').expect("echo target is host:port");
-    let port = port.parse().expect("echo port is a number");
-    let (destination, port) = Destination::parse(host, port).expect("echo is a legal destination");
-    (destination, port)
+    target("RRC_INTEROP_ECHO")
+}
+
+/// One of the fixture's loopback destinations, read the same way every time.
+///
+/// These are addresses the **node** dials, not this process, which is why they come
+/// from the handoff file rather than from a listener in the test.
+fn target(name: &str) -> (Destination, u16) {
+    let endpoint = parameter(name);
+    let (host, port) = endpoint.rsplit_once(':').expect("target is host:port");
+    let port = port.parse().expect("target port is a number");
+    Destination::parse(host, port).unwrap_or_else(|| panic!("{name} is not a legal destination"))
 }
 
 /// Opens one REALITY tunnel and hands back the live socket plus its handshake.
@@ -860,4 +889,584 @@ fn connect_head(destination: &Destination, port: u16) -> Vec<u8> {
         Destination::IPv6(octets) => format!("[{}]", Ipv6Addr::from(*octets)),
     };
     format!("CONNECT {host}:{port} HTTP/1.1\r\n\r\n").into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// The half of the matrix that only a live node can produce
+// ---------------------------------------------------------------------------
+//
+// Everything above this line fails *before* the destination is involved, so a
+// scripted seam can produce it. What follows happens beyond an authenticated
+// session, where a fake would have to fabricate the very thing under test: the
+// node's own connect to a destination, its relay of the destination's bytes, and
+// the way it ends a tunnel when one of those goes wrong. The fixture therefore
+// runs `fault_targets.py` on the node's own loopback, and each test below asserts
+// what that arrangement actually produced.
+
+/// A dial, built the way every shipped path builds it.
+fn dial() -> Dial {
+    Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    )
+}
+
+/// Opens one tunnel to a destination the **node** dials, through the shipped path.
+async fn tunnel_to(name: &str) -> Result<Established, Error> {
+    let (destination, port) = target(name);
+    Handoff::new(configured_node(), dial())
+        .establish(&destination, port)
+        .await
+}
+
+/// Carries one marker through a live session and checks it comes back unchanged.
+async fn round_trip(session: &mut VisionSession<TcpStream>, marker: &[u8]) {
+    session
+        .write_all(marker)
+        .await
+        .unwrap_or_else(|error| panic!("writing {marker:?} into a live tunnel: {error}"));
+    let mut echoed = vec![0_u8; marker.len()];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+        .await
+        .expect("the destination must answer inside the budget")
+        .unwrap_or_else(|error| panic!("reading {marker:?} back: {error}"));
+    assert_eq!(
+        echoed, marker,
+        "the tunnel altered or reordered application bytes"
+    );
+}
+
+/// One local application socket, its bound address, and the task serving it.
+///
+/// The client half is written by hand in the tests that use this, because the claim
+/// is always about what an application sees on its own socket.
+async fn socks5_client<E: Establish>(
+    proxy: &Proxy<E>,
+) -> (TcpStream, SocketAddr, tokio::task::JoinHandle<Outcome>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener for the SOCKS5 client");
+    let bound = listener.local_addr().expect("local address");
+    let client = TcpStream::connect(bound)
+        .await
+        .unwrap_or_else(|error| panic!("connecting as a SOCKS5 client to {bound}: {error}"));
+    let (mut served, _peer) = listener.accept().await.expect("accept the client");
+    let proxy = proxy.clone();
+    let exchange = tokio::spawn(async move { proxy.handle(&mut served, bound).await });
+    (client, bound, exchange)
+}
+
+/// One complete SOCKS5 exchange against one of the fixture's destinations.
+///
+/// A failure anywhere in it panics rather than returning an error, which is what a
+/// storm or a soak wants: an application-visible refusal is a test failure, not a
+/// number to be tallied and explained afterwards.
+async fn socks5_round_trip<E: Establish>(proxy: &Proxy<E>, name: &str) -> Outcome {
+    let (destination, port) = target(name);
+    let (mut client, bound, exchange) = socks5_client(proxy).await;
+
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .expect("send the greeting");
+    let mut selection = [0_u8; 2];
+    tokio::time::timeout(LIVE_BUDGET, client.read_exact(&mut selection))
+        .await
+        .expect("the greeting is answered inside the budget")
+        .expect("read the method selection");
+    assert_eq!(
+        selection,
+        [0x05, 0x00],
+        "no method but the loopback one is offered"
+    );
+
+    client
+        .write_all(&connect_request(&destination, port))
+        .await
+        .expect("send the CONNECT");
+    let mut reply = [0_u8; 10];
+    tokio::time::timeout(LIVE_BUDGET, client.read_exact(&mut reply))
+        .await
+        .expect("the node answers inside the budget")
+        .expect("read the reply");
+    assert_eq!(
+        reply[..4],
+        [0x05, 0x00, 0x00, 0x01],
+        "a tunnel is confirmed with 0x00"
+    );
+    assert_binds_to(&reply, bound);
+
+    let probe = b"round trip through a live node\n";
+    client.write_all(probe).await.expect("send the payload");
+    let mut echoed = vec![0_u8; probe.len()];
+    tokio::time::timeout(READ_TIMEOUT, client.read_exact(&mut echoed))
+        .await
+        .expect("the destination answers inside the budget")
+        .expect("read the payload back");
+    assert_eq!(
+        echoed, probe,
+        "the tunnel altered or reordered application bytes"
+    );
+
+    client
+        .shutdown()
+        .await
+        .expect("half-close from the application side");
+    tokio::time::timeout(LIVE_BUDGET, exchange)
+        .await
+        .expect("the exchange ends once both directions have")
+        .expect("the serving task does not panic")
+}
+
+/// Counts the tunnels a seam opens, while opening exactly what the real seam opens.
+///
+/// The immutability rule is a claim about *calls*: once a local client has been told
+/// a session exists, nothing beyond it may cause another one. The only way to prove
+/// that against a real node is to count.
+#[derive(Clone)]
+struct Counted {
+    inner: Handoff,
+    opens: Arc<AtomicUsize>,
+}
+
+impl Counted {
+    /// Wraps the live handoff and hands back the counter it increments.
+    fn new(inner: Handoff) -> (Self, Arc<AtomicUsize>) {
+        let opens = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                inner,
+                opens: Arc::clone(&opens),
+            },
+            opens,
+        )
+    }
+}
+
+impl Establish for Counted {
+    fn establish(&self, destination: Destination, port: u16) -> Establishment {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        let inner = self.inner.clone();
+        Box::pin(async move { inner.establish(&destination, port).await })
+    }
+}
+
+/// A destination that is not listening at all, as the node leaves it.
+///
+/// This is the failure an operator notices first and understands least: the tunnel
+/// authenticated, so nothing is wrong with the node or the route, and yet no
+/// connection can be made. v2.0.1 answers it by closing the tunnel without ever
+/// writing a response header, which the client must read as silence in tens of
+/// milliseconds rather than as a budget it has to wait out.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its fault targets"]
+async fn a_destination_that_is_down_fails_fast_and_leaves_the_node_usable() {
+    let started = Instant::now();
+    let error = tunnel_to("RRC_INTEROP_CLOSED")
+        .await
+        .expect_err("nothing listens at that port, so no tunnel can honestly be promised");
+    let took = started.elapsed();
+
+    assert!(
+        matches!(error, Error::Session(SessionError::ClosedBeforeResponse)),
+        "v2.0.1 closes a tunnel whose destination refused, without answering: {error}"
+    );
+    assert!(
+        took < FIRST_BYTE_BUDGET,
+        "the node's own connect failed immediately, so the client must not sit out its \
+         whole silence budget: {took:?}"
+    );
+    assert!(
+        error.classify().counts_against_node(),
+        "a node that closes every attempt before answering is a bad path, and no client \
+         can tell that apart from a destination that was simply down"
+    );
+
+    // The verdict is about one destination, not about the node: the next connection
+    // to a destination that exists must still be served.
+    let mut session = tunnel_to("RRC_INTEROP_ECHO")
+        .await
+        .expect("the node must still serve a destination that is there")
+        .session;
+    round_trip(&mut session, b"the node is still usable\n").await;
+}
+
+/// A destination that accepts, says nothing, and closes.
+///
+/// The node has already promised the tunnel by the time this happens, so the only
+/// honest answer left is the end of the stream. A client that turned this into an
+/// error, or retried it elsewhere, would be reporting a fault of its own making.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its fault targets"]
+async fn a_destination_that_hangs_up_without_a_word_arrives_as_an_end_of_stream() {
+    let mut session = tunnel_to("RRC_INTEROP_DROP")
+        .await
+        .expect("the node reached the destination, so the tunnel was promised honestly")
+        .session;
+
+    let mut received = Vec::new();
+    let read = tokio::time::timeout(READ_TIMEOUT, session.read_to_end(&mut received))
+        .await
+        .expect("the destination's close must reach the client inside the budget");
+    let bytes = read.unwrap_or_else(|error| panic!("an orderly close is not an error: {error}"));
+
+    assert_eq!(bytes, 0, "that destination never sent a byte");
+    assert!(received.is_empty(), "the client may not invent a payload");
+    assert!(
+        session.peer_closed(),
+        "the node ends the downlink with an authenticated close_notify"
+    );
+    assert!(
+        session.failure().is_none(),
+        "a destination that chose to stop talking is not a broken tunnel"
+    );
+}
+
+/// A destination that resets instead of closing.
+///
+/// The same end, arriving as a reset rather than a `FIN`. It must not be mistaken
+/// for an orderly close — an application that saw zero bytes and a clean end would
+/// believe the transfer finished.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its fault targets"]
+async fn a_destination_that_resets_reaches_the_application_as_a_failure() {
+    let mut session = tunnel_to("RRC_INTEROP_RST")
+        .await
+        .expect("the node reached the destination before it reset")
+        .session;
+
+    // Whether the reset arrives before or after the client's first write is a race
+    // between two directions of one tunnel, and the answer is the same either way.
+    let _ = session.write_all(b"reset target\n").await;
+    let mut received = Vec::new();
+    let read = tokio::time::timeout(READ_TIMEOUT, session.read_to_end(&mut received))
+        .await
+        .expect("the reset must reach the client inside the budget");
+
+    assert!(
+        read.is_err(),
+        "a reset cannot be read as an orderly close: {read:?}"
+    );
+    assert!(
+        !session.peer_closed(),
+        "there was no close_notify to wait for, so the tunnel ended by force"
+    );
+    assert!(
+        session.failure().is_some(),
+        "the failure is recorded for the log whatever the read happened to return"
+    );
+}
+
+/// A download that dies partway, on a tunnel the application was told exists.
+///
+/// This is the live proof of the rule the whole crate is built on. The `0x00` reply
+/// has been sent, bytes have arrived, and then the destination resets: nothing may
+/// re-dial, replay, or quietly try a second tunnel to finish what the first one
+/// started. So the seam is counted, and exactly one open is expected for one local
+/// connection — the failure is handed to the application, not repaired.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its fault targets"]
+async fn a_session_that_dies_mid_download_is_reported_and_never_retried() {
+    let (counted, opens) = Counted::new(Handoff::new(configured_node(), dial()));
+    let proxy = Proxy::new(counted, Gate::default());
+    let (destination, port) = target("RRC_INTEROP_TRUNCATE");
+    let (mut client, bound, exchange) = socks5_client(&proxy).await;
+
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .expect("send the greeting");
+    let mut selection = [0_u8; 2];
+    tokio::time::timeout(LIVE_BUDGET, client.read_exact(&mut selection))
+        .await
+        .expect("the greeting is answered inside the budget")
+        .expect("read the method selection");
+    assert_eq!(selection, [0x05, 0x00]);
+
+    client
+        .write_all(&connect_request(&destination, port))
+        .await
+        .expect("send the CONNECT");
+    let mut reply = [0_u8; 10];
+    tokio::time::timeout(LIVE_BUDGET, client.read_exact(&mut reply))
+        .await
+        .expect("the node answers inside the budget")
+        .expect("read the reply");
+    assert_eq!(
+        reply[..4],
+        [0x05, 0x00, 0x00, 0x01],
+        "the tunnel is promised before the destination's trouble begins"
+    );
+    assert_binds_to(&reply, bound);
+
+    // Only now does the application ask for anything, because the destination sends its
+    // burst once it has a byte to answer — and dies partway through delivering it.
+    client
+        .write_all(b"send me the burst\n")
+        .await
+        .expect("send the request");
+
+    let outcome = tokio::time::timeout(LIVE_BUDGET, exchange)
+        .await
+        .expect("the exchange ends once the tunnel does")
+        .expect("the serving task does not panic");
+    assert!(
+        matches!(outcome, Outcome::Failed(_)),
+        "a download that dies mid-flight is a failure the application sees, not a \
+         silence and not a success: {outcome:?}"
+    );
+
+    // Whatever of the burst arrived is what the application keeps, and it cannot have
+    // been all of it: the destination reset before its own write finished.
+    let mut partial = Vec::new();
+    let _ = client.read_to_end(&mut partial).await;
+    assert!(
+        partial.len() < DESTINATION_BURST,
+        "a download whose destination reset mid-burst cannot have completed"
+    );
+
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        1,
+        "one local connection, one tunnel: nothing was re-dialled to finish the download"
+    );
+    assert_eq!(
+        proxy.gate().connections_available(),
+        MAX_LOCAL_CONNECTIONS,
+        "and the failed exchange cost no capacity"
+    );
+    assert_eq!(
+        proxy.gate().handshakes_available(),
+        MAX_CONCURRENT_HANDSHAKES,
+        "including the slot that authentication borrows"
+    );
+}
+
+/// A destination that answers late, which is the ordinary case rather than a fault.
+///
+/// No userspace read-idle deadline may end a healthy authenticated connection, and
+/// the destination's own slowness is exactly what such a deadline would kill. The
+/// budget that applies here is the one for a node that never answers at all.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its fault targets"]
+async fn a_destination_that_answers_late_is_not_torn_down() {
+    let started = Instant::now();
+    let mut session = tunnel_to("RRC_INTEROP_LATE")
+        .await
+        .expect("a slow destination is not a dead one")
+        .session;
+
+    let probe = b"answer whenever you can\n";
+    session.write_all(probe).await.expect("write the probe");
+    let mut echoed = vec![0_u8; probe.len() + 4];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+        .await
+        .expect("the client must outwait the destination's own silence")
+        .expect("read the reply");
+    assert_eq!(&echoed[..4], b"LATE", "the destination's bytes come first");
+    assert_eq!(&echoed[4..], probe);
+
+    let took = started.elapsed();
+    assert!(
+        took >= DESTINATION_FLOOR,
+        "the reply cannot arrive before the destination woke up: {took:?}"
+    );
+    assert!(
+        took < FIRST_BYTE_BUDGET,
+        "and waiting out a slow server must cost strictly less than the budget for a \
+         node that never answers: {took:?}"
+    );
+}
+
+/// The same tunnel, used again after more quiet than the keepalive idle.
+///
+/// NAT boxes drop an idle mapping well inside a minute, which is the whole reason
+/// this client sets keepalive at all. The claim is the operator-facing one: a
+/// connection held open for thirty-five seconds with nothing on it still carries
+/// bytes, and the client did not need to re-establish anything to notice.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn an_idle_tunnel_survives_past_the_keepalive_idle() {
+    let mut session = tunnel_to("RRC_INTEROP_ECHO")
+        .await
+        .expect("the tunnel is up before the quiet begins")
+        .session;
+    round_trip(&mut session, b"before the quiet\n").await;
+
+    tokio::time::sleep(KEEPALIVE_IDLE + Duration::from_secs(5)).await;
+
+    round_trip(&mut session, b"after the quiet\n").await;
+    assert!(
+        session.failure().is_none(),
+        "a tunnel that answers after sitting idle was never broken"
+    );
+}
+
+/// Twenty-four local connections at once, through one live node, over a scheduler
+/// that is allowed to hedge.
+///
+/// The ceiling exists to be pressed: a localhost listener is not a trust boundary,
+/// and the page load that opens thirty sockets is the normal case rather than an
+/// attack. Every one of them must be answered, and none of them may cost the client
+/// a slot it never gives back.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn a_storm_of_concurrent_connects_all_get_answered() {
+    let node = configured_node();
+    // A third node that cannot authenticate: a storm is when a client is most tempted
+    // to route onto a broken path because it was the one that answered first somewhere.
+    let mut broken = node.clone();
+    broken.name = "broken".to_owned();
+    broken.reality.public_key = [0x11; 32];
+    let scheduler = Scheduler::new(
+        vec![
+            Handoff::new(node.clone(), dial()),
+            Handoff::new(node, dial()),
+            Handoff::new(broken, dial()),
+        ],
+        vec![
+            "primary".to_owned(),
+            "spare".to_owned(),
+            "broken".to_owned(),
+        ],
+        Policy::default(),
+    );
+    let proxy = Proxy::new(scheduler.clone(), Gate::default());
+
+    let mut tasks = Vec::with_capacity(STORM);
+    for _connection in 0..STORM {
+        let proxy = proxy.clone();
+        tasks.push(tokio::spawn(async move {
+            socks5_round_trip(&proxy, "RRC_INTEROP_ECHO").await
+        }));
+    }
+
+    for task in tasks {
+        match task.await.expect("a serving task does not panic") {
+            Outcome::Carried(_) => {}
+            other => panic!("a client with free capacity refused a local connection: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        proxy.gate().connections_available(),
+        MAX_LOCAL_CONNECTIONS,
+        "every connection slot came back"
+    );
+    assert_eq!(
+        proxy.gate().handshakes_available(),
+        MAX_CONCURRENT_HANDSHAKES,
+        "and so did every handshake slot, including the ones the hedge abandoned"
+    );
+    let report = scheduler.report();
+    assert_eq!(
+        report[2].health.successes, 0,
+        "the node that cannot authenticate served nothing, however busy the client was"
+    );
+    let served: u64 = report.iter().map(|entry| entry.health.successes).sum();
+    assert!(
+        served >= u64::try_from(STORM).expect("a test count fits a u64"),
+        "every connection was won by exactly one node, and a hedge that ran to \
+         completion is counted too: {served}"
+    );
+    assert!(
+        report[..2].iter().all(|entry| entry.health.failures == 0),
+        "and none of it happened because a good node was charged for a bad one: {report:?}"
+    );
+}
+
+/// How long the soak runs, which an operator may extend without editing a test.
+fn soak_seconds() -> u64 {
+    std::env::var("RRC_SOAK_SECONDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(DEFAULT_SOAK_SECONDS)
+}
+
+/// A sustained run, with the numbers an operator would ask for printed.
+///
+/// Attempts, successes and failures here are not tallied by the test: any
+/// application-visible failure panics inside [`socks5_round_trip`], so reaching the
+/// end of the window is itself the claim. What is checked at the end is the part a
+/// soak exists to find — capacity that never came back, and a route that drifted off
+/// the node that has been serving it.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn a_soak_keeps_the_route_and_the_slots() {
+    let window = Duration::from_secs(soak_seconds());
+    let node = configured_node();
+    let scheduler = Scheduler::new(
+        vec![
+            Handoff::new(node.clone(), dial()),
+            Handoff::new(node, dial()),
+        ],
+        vec!["primary".to_owned(), "spare".to_owned()],
+        Policy::default(),
+    );
+    let proxy = Proxy::new(scheduler.clone(), Gate::default());
+
+    // One session held for the whole window, because a soak that only opens and
+    // closes would never notice a long connection being dropped.
+    let mut long_lived = tunnel_to("RRC_INTEROP_ECHO")
+        .await
+        .expect("the long-lived path is up before the window opens")
+        .session;
+    round_trip(&mut long_lived, b"soak opened\n").await;
+
+    let started = Instant::now();
+    let mut connections = 0_u64;
+    let mut slowest = Duration::ZERO;
+    let mut fastest = Duration::MAX;
+    let mut bytes = 0_u64;
+    while started.elapsed() < window {
+        let attempt = Instant::now();
+        match socks5_round_trip(&proxy, "RRC_INTEROP_ECHO").await {
+            Outcome::Carried(moved) => bytes += moved.to_local,
+            other => panic!("connection {connections} was not carried: {other:?}"),
+        }
+        let took = attempt.elapsed();
+        fastest = fastest.min(took);
+        slowest = slowest.max(took);
+        connections += 1;
+        if connections % 4 == 0 {
+            round_trip(&mut long_lived, b"still here\n").await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let elapsed = started.elapsed();
+
+    assert!(
+        connections >= 5,
+        "a window of {elapsed:?} must have carried real work, not one connection"
+    );
+    assert_eq!(
+        proxy.gate().connections_available(),
+        MAX_LOCAL_CONNECTIONS,
+        "{connections} connections in {elapsed:?} and the edge has every slot back"
+    );
+    assert_eq!(
+        proxy.gate().handshakes_available(),
+        MAX_CONCURRENT_HANDSHAKES,
+        "the same for authentication, which is where a hedge leak would show up"
+    );
+
+    let report = scheduler.report();
+    let primary = report
+        .iter()
+        .find(|entry| entry.primary)
+        .expect("a scheduler that served connections has a primary");
+    assert!(
+        primary.health.successes > 0,
+        "and it is the node that served them: {report:?}"
+    );
+    assert!(
+        report.iter().all(|entry| entry.health.failures == 0),
+        "no node was ever failed by this window: {report:?}"
+    );
+    println!(
+        "SOAK {elapsed:?}: {connections} connections, {bytes} bytes down, \
+         fastest {fastest:?}, slowest {slowest:?}, primary {} \
+         ({} successes, {} failures), long-lived session still up",
+        primary.name, primary.health.successes, primary.health.failures
+    );
 }
