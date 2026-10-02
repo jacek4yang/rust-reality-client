@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use rust_reality_client::config;
+use rust_reality_client::error::Failure;
 use rust_reality_client::handoff::{Established, FIRST_BYTE_BUDGET, Handoff};
 use rust_reality_client::inbound::Gate;
 use rust_reality_client::inbound::http;
@@ -25,6 +26,7 @@ use rust_reality_client::protocol::reality::{
     X25519_MLKEM768_GROUP, build_client_hello, complete,
 };
 use rust_reality_client::protocol::vless::Destination;
+use rust_reality_client::scheduler::{Policy, Scheduler};
 use rust_reality_client::transport::{
     AddressFamily, Dial, DialPolicy, Environment, Transferred, Tuning, VisionSession, carry,
 };
@@ -543,6 +545,98 @@ async fn repeated_establishments_all_succeed_through_v201() {
             "attempt {attempt} did not reach the same destination"
         );
     }
+}
+
+/// One scheduler over two real nodes, the first of which cannot authenticate.
+///
+/// The wrong public key is the fault a client can be most sure of and least able to
+/// see: the address answers, the port is open, the cover completes its own TLS — and
+/// only the REALITY finish proves this is not the node. So every attempt against it
+/// fails at the handshake, which is the family the breaker is owed, while the second
+/// node keeps answering. The claim is the one the whole scheduler exists for: five
+/// connections in a row, and not one of them is an error the application has to
+/// handle.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
+async fn a_scheduler_routes_past_a_node_that_cannot_authenticate() {
+    let dial = Dial::new(
+        Environment::detect(DialPolicy::Auto),
+        Tuning::for_policy(DialPolicy::Auto),
+    );
+    let live = configured_node();
+    let mut broken = live.clone();
+    broken.name = "broken".to_owned();
+    broken.reality.public_key = [0x11; 32];
+
+    let scheduler = Scheduler::new(
+        vec![
+            Handoff::new(broken, dial.clone()),
+            Handoff::new(live, dial.clone()),
+        ],
+        vec!["broken".to_owned(), "live".to_owned()],
+        Policy::default(),
+    );
+    let (destination, port) = echo_target();
+    let mut asked = Vec::new();
+
+    for attempt in 1..=5 {
+        let mut session =
+            tokio::time::timeout(READ_TIMEOUT * 3, scheduler.open(destination.clone(), port))
+                .await
+                .unwrap_or_else(|_| panic!("attempt {attempt} must finish inside the budget"))
+                .unwrap_or_else(|error| panic!("attempt {attempt} must establish: {error}"))
+                .session;
+
+        check_negotiated(session.negotiated());
+        let marker = format!("attempt {attempt}\n");
+        session
+            .write_all(marker.as_bytes())
+            .await
+            .expect("write the marker");
+        let mut echoed = vec![0_u8; marker.len()];
+        tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut echoed))
+            .await
+            .expect("the echo must answer inside the budget")
+            .expect("read the marker back");
+        assert_eq!(echoed, marker.as_bytes());
+
+        let health = &scheduler.report()[0].health;
+        asked.push(health.successes + health.failures + u64::from(health.hedge_losses));
+    }
+
+    let report = scheduler.report();
+    assert_eq!(report[0].health.successes, 0, "it never authenticated");
+    assert_eq!(
+        report[1].health.successes, 5,
+        "every connection was served, whichever node was asked first"
+    );
+    assert!(
+        report[1].primary,
+        "and the route ended on the node that answers: {report:?}"
+    );
+    // What moves the route is the measurement, not the refusal: the broken node spends a
+    // handshake failing, so it never has a latency to claim, and the node that answers in
+    // seventeen milliseconds takes the lead on the guards the plan sets. Once it has, the
+    // broken node is not asked at all — which is the whole point, because being asked
+    // costs this client a hedge delay on every connection.
+    assert!(
+        report[0]
+            .health
+            .last_failure
+            .is_none_or(Failure::counts_against_node),
+        "whatever it was charged was about the node: {:?}",
+        report[0].health.last_failure
+    );
+    assert!(
+        asked.windows(2).all(|pair| pair[1] >= pair[0]),
+        "a node is only ever asked more, never forgiven backwards: {asked:?}"
+    );
+    assert_eq!(
+        *asked.last().expect("five attempts were counted"),
+        asked[1],
+        "by the third connection the node that cannot authenticate stopped being asked: \
+         {asked:?}"
+    );
 }
 
 /// One real SOCKS5 exchange, end to end through an unmodified v2.0.1 node.
