@@ -1,0 +1,6 @@
+/target/
+.upstream/
+.qoder/
+*.pdb
+*.exe
+/soak/

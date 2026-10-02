@@ -1,0 +1,60 @@
+[package]
+name = "rust-reality-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Native Rust VLESS + REALITY + xtls-rprx-vision client, wire-compatible with rust-reality v2.0.1"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["proxy", "vless", "reality", "vision", "socks5"]
+categories = ["network-programming"]
+
+[lib]
+name = "rust_reality_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-reality-client"
+path = "src/main.rs"
+
+[dependencies]
+# The crypto stack is pinned to the same versions rust-reality v2.0.1 builds
+# with, so wire behaviour cannot diverge through a primitive's backend choice.
+aes-gcm = { version = "0.11.0", default-features = false, features = ["aes", "zeroize"] }
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast", "zeroize"] }
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+ml-kem = { version = "0.3.2", default-features = false, features = ["zeroize"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+socket2 = { version = "0.6", features = ["all"] }
+subtle = { version = "2.6.1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+toml = "0.9"
+uuid = { version = "1", default-features = false, features = ["v4", "std"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc", "derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
