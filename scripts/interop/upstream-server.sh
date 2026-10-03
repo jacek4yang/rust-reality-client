@@ -44,7 +44,7 @@ trap cleanup EXIT INT TERM
 # REALITY needs a cover that speaks TLS 1.3 over X25519. A loopback origin is
 # enough: v2.0.1 mirrors the pre-authentication prefix to it and reads its
 # flight, and it dials the cover for every connection, authenticated or not.
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+openssl req -x509 -newkey rsa:2048 -nodes -days "${INTEROP_TLS_DAYS:-1}" \
   -subj /CN=localhost -addext subjectAltName=DNS:localhost \
   -keyout "$OUT_DIR/cover.key" -out "$OUT_DIR/cover.crt" 2>/dev/null
 python3 "$REPO/scripts/interop/cover_tls13.py" \

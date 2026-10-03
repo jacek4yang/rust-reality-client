@@ -89,7 +89,9 @@ jobs:
       - name: Build experimental per-socket user-timeout control
         run: |
           set -euo pipefail
-          python3 scripts/experiments/build_ablations.py --only with-user-timeout
+          # Keep this control tied to the pre-policy source, changing one mechanism.
+          git fetch --no-tags origin 59cf467cf8ad5836129bc59adb478abfa00b701d
+          python3 scripts/experiments/build_ablations.py --revision 59cf467cf8ad5836129bc59adb478abfa00b701d --only with-user-timeout
           git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
           git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
           rustup toolchain install 1.96.0 --profile minimal
@@ -98,6 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           binary="$PWD/target/ablations/with-user-timeout/target/release/rust-reality-client"
+          mkdir -p target/timeout-results
           for seconds in 5 20 40; do
             for scenario in idle-transient write-transient; do
               sudo env RESTORE_SECONDS="$seconds" INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \

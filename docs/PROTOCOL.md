@@ -459,3 +459,14 @@ bounds in this repository — `DNS_BUDGET` 5 s and `CONNECT_BUDGET` 10 s
 (`src/handoff.rs:78`) — because an unanswered setup question has no value in being
 asked longer, and a stuck handshake that is not released is a slot that nobody
 else can use.
+
+## Tiny initial raw responses on the pinned server
+
+`src/server/vision.rs:1936-1951` loops until `NESTED_TLS_HEADER_SIZE` (five bytes)
+or destination EOF before classifying the first downlink. A destination sending
+three bytes and waiting on an open socket can therefore deadlock an application
+request/response exchange. Controlled three-byte echo probes timed out through
+both the Rust client and stock Xray v26.9.9; the direct-origin control passed.
+The application fixture exposes `--raw-probe-bytes 3` for reproduction. This is
+an unchanged-server limitation, not evidence to silently pad/replay application
+bytes or claim that switching entry nodes fixes it.

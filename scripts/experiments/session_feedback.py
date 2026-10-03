@@ -78,7 +78,7 @@ def run(binary,out,values):
                     with socket.create_connection(('127.0.0.1',port),.2):break
                 except OSError:time.sleep(.05)
             # Retained stream proves later route choices don't migrate or kill it.
-            old=tunnel(port,14444,'socks');old.sendall(b'old');assert recv_exact(old,3)==b'old'
+            old=tunnel(port,14444,'socks');old.sendall(b'old-stream-alive');assert recv_exact(old,len(b'old-stream-alive'))==b'old-stream-alive'
             for sequence in range(12):
                 before=len(fast.connections)
                 sock=tunnel(port,14444,'socks');sock.settimeout(5)
@@ -93,7 +93,7 @@ def run(binary,out,values):
                 finally:sock.close()
                 rows.append({'sequence':sequence,'path':'fast-corrupted' if chosen_fast else 'slower-intact','delivered':good,'elapsed_seconds':time.monotonic()-started})
                 time.sleep(.05)
-                old.sendall(b'old');assert recv_exact(old,3)==b'old','existing stream interrupted by future routing'
+                old.sendall(b'old-stream-alive');assert recv_exact(old,len(b'old-stream-alive'))==b'old-stream-alive','existing stream interrupted by future routing'
             old.close()
         finally:
             client.send_signal(signal.SIGINT)

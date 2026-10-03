@@ -155,6 +155,7 @@ impl fmt::Debug for Completion {
 struct Family {
     seen: bool,
     faults: u8,
+    fault_at: u64,
     until: u64,
     recovered: u64,
     last: u64,
@@ -194,6 +195,7 @@ impl Quality {
         }
         if completion.cause == Cause::Unknown {
             state.unknown = state.unknown.saturating_add(1);
+            return;
         }
         let entry = &mut state.families[match family {
             AddressFamily::Ipv4 => 0,
@@ -211,6 +213,10 @@ impl Quality {
             return;
         } // a pre-recovery session cannot re-poison a recovered path
         if completion.cause == Cause::TunnelProtocol {
+            if entry.faults == 0 || now.saturating_sub(entry.fault_at) > 300_000 {
+                entry.faults = 0;
+                entry.fault_at = now;
+            }
             entry.faults = entry.faults.saturating_add(1).min(3);
             if entry.faults >= 3 {
                 entry.until = now.saturating_add(30_000);
@@ -403,6 +409,66 @@ mod tests {
             }
             assert_eq!(quality.penalty_ms(100), 0);
         }
+    }
+
+    #[test]
+    fn old_faults_expire_even_when_short_successes_keep_arriving() {
+        let quality = Quality::default();
+        for now in 1..=3 {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        for now in (10_000..360_000).step_by(10_000) {
+            quality.record(AddressFamily::Ipv4, now, now, &verdict(Cause::Normal));
+        }
+        quality.record(
+            AddressFamily::Ipv4,
+            360_000,
+            360_000,
+            &verdict(Cause::TunnelProtocol),
+        );
+        assert_eq!(
+            quality.penalty_ms(360_000),
+            0,
+            "one fresh fault must not inherit indefinitely old strikes"
+        );
+    }
+
+    #[test]
+    fn three_faults_must_share_one_bounded_window() {
+        let quality = Quality::default();
+        for now in [1, 299_999, 599_998] {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        assert_eq!(quality.penalty_ms(599_998), 0);
+    }
+
+    #[test]
+    fn unknown_alternate_family_is_not_a_proven_healthy_escape() {
+        let quality = Quality::default();
+        for now in 1..=3 {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        quality.record(AddressFamily::Ipv6, 4, 4, &verdict(Cause::Unknown));
+        assert_eq!(
+            quality.penalty_ms(4),
+            500,
+            "ambiguous completion cannot clear a different failure class"
+        );
     }
 
     #[test]

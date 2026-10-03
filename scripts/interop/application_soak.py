@@ -180,6 +180,7 @@ def sample_process(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--raw-probe-bytes', type=int, default=0, help='diagnostic tiny raw-TCP round trip before TLS workloads')
     parser.add_argument('--handoff', action='store_true', help='use isolated LINE and LANDING server processes')
     parser.add_argument('--quiet-client', action='store_true', help='warn-level client logs for like-for-like timing runs')
     parser.add_argument('--quiet-seconds', type=float, default=65)
@@ -241,6 +242,13 @@ def main():
             try:
                 with socket.create_connection(('127.0.0.1', http_port), timeout=.1): break
             except OSError: time.sleep(.05)
+        if args.raw_probe_bytes:
+            with (socket.create_connection(('127.0.0.1', 14444), 15) if args.direct else tunnel(socks_port, 14444, 'socks')) as raw:
+                raw.settimeout(3)
+                payload = b'x' * args.raw_probe_bytes
+                raw.sendall(payload)
+                assert recv_exact(raw, len(payload)) == payload
+                result['raw_probe_bytes'] = len(payload)
         folder = args.output / 'fixture/tls'
         versions = [('tls13', ssl.TLSVersion.TLSv1_3), ('tls12', ssl.TLSVersion.TLSv1_2)]
         result['pipelining'] = []
@@ -279,12 +287,17 @@ def main():
                     pong = await ws.ping(struct.pack('!Q', n))
                     await asyncio.wait_for(pong, 10)
                     n += 1
-                    if short: return n
+                    if short:
+                        await ws.close(code=1000)
+                        assert ws.close_code == 1000, "incomplete WebSocket Close exchange"
+                        return n
                     # App-level quiet > keepalive window on long runs. Native TCP
                     # probes remain enabled; no proxy-generated WebSocket pings.
                     quiet = min(args.quiet_seconds if n % 10 == 0 else .1, max(0, until - time.monotonic()))
                     await asyncio.sleep(quiet)
-                return {"messages": n, "wall_seconds": time.monotonic() - began}
+                await ws.close(code=1000)
+                assert ws.close_code == 1000, "incomplete WebSocket Close exchange"
+                return {"messages": n, "wall_seconds": time.monotonic() - began, "close_code": ws.close_code}
 
         def sse(kind, proxy, endpoint):
             label, version, _, port = endpoint
@@ -302,7 +315,7 @@ def main():
                         assert stream.readline() == b'\n'
                         sequence += 1
                         if sequence % 20 == 0: stop.wait(.5) # bounded slow reader
-                    assert time.monotonic() >= until - 1, 'SSE ended before workload deadline'
+                    assert time.monotonic() >= until, 'SSE ended before workload deadline'
                     return {"events": sequence}
 
         async def churn():
@@ -356,12 +369,19 @@ def main():
         sessions = [e for e in events if e.get('event') == 'sessionFinished']
         modes = {e.get('downlink') for e in sessions}
         server_modes = set()
+        handoff_sessions = 0
         for line in (args.output / 'node.log').read_text().splitlines():
             try: event = json.loads(line)
             except json.JSONDecodeError: continue
+            if event.get('event') == 'connection_completed' and 'handoff_server_sequence' in event:
+                handoff_sessions += 1
             if event.get('event') == 'connection_completed' and 'downlink_direct' in event:
                 server_modes.add('direct' if event['downlink_direct'] else 'non-direct')
-        assert args.direct or {'direct', 'non-direct'} <= server_modes, f'missing server transitions: {server_modes}'
+        if args.handoff:
+            assert handoff_sessions > 0, 'no evidence of the LANDING path'
+        else:
+            assert args.direct or {'direct', 'non-direct'} <= server_modes, f'missing server transitions: {server_modes}'
+        result['handoff_sessions'] = handoff_sessions
         if args.implementation == 'rust-current' and not args.direct and not args.quiet_client:
             assert {'direct', 'outer'} <= modes, f'missing client transitions: {modes}'
         result['server_modes'] = sorted(server_modes)
