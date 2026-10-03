@@ -1,0 +1,80 @@
+name: Isolated packet experiments
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/experiments/**
+      - scripts/interop/upstream-server.sh
+      - .github/workflows/packet-experiments.yml
+permissions:
+  contents: read
+concurrency:
+  group: packet-experiments-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.98.1
+      - name: Build exact clients and pinned unmodified server
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 build --release --locked
+          python3 scripts/experiments/build_ablations.py --only no-client-keepalive
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          curl -fL --retry 2 https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-linux-64.zip -o "$RUNNER_TEMP/xray.zip"
+          echo "1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df  $RUNNER_TEMP/xray.zip" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/xray.zip" xray -d "$RUNNER_TEMP/xray"
+          chmod +x "$RUNNER_TEMP/xray/xray"
+          "$RUNNER_TEMP/xray/xray" version
+      - name: Real packet loss and keepalive ablation
+        run: |
+          set -euo pipefail
+          mkdir -p target/packet-results
+          for variant in current xray no-keepalive; do
+            impl=rust-current
+            case "$variant" in
+              current) binary="$PWD/target/release/rust-reality-client" ;;
+              xray) binary="$RUNNER_TEMP/xray/xray"; impl=xray ;;
+              no-keepalive) binary="$PWD/target/ablations/no-client-keepalive/target/release/rust-reality-client" ;;
+            esac
+            sha256sum "$binary" >> target/packet-results/binaries.sha256
+            for scenario in idle-transient write-transient idle-blackhole write-blackhole; do
+              sudo env INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+                bash scripts/experiments/packet_faults.sh "$binary" "$impl" \
+                "$PWD/target/packet-results/$variant-$scenario" "$scenario"
+            done
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = {p.parent.name: json.loads(p.read_text()) for p in Path('target/packet-results').glob('*/result.json')}
+          assert len(rows) == 12, rows.keys()
+          for name, result in rows.items():
+              if name.endswith('transient'):
+                  assert result['recovered'], (name, result)
+          Path('target/packet-results/summary.json').write_text(json.dumps(rows, indent=2)+'\n')
+          print(json.dumps(rows, indent=2))
+          PY
+      - name: Collect only non-secret experiment records
+        if: always()
+        run: |
+          mkdir -p evidence
+          find target/packet-results -name result.json -exec sh -c 'cp "$1" "evidence/$(basename "$(dirname "$1")").json"' sh {} \; 2>/dev/null || true
+          cp target/packet-results/summary.json target/packet-results/binaries.sha256 evidence/ 2>/dev/null || true
+          git rev-parse HEAD > evidence/source-commit.txt
+          uname -a > evidence/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: packet-experiment-evidence
+          path: evidence/
+          if-no-files-found: error

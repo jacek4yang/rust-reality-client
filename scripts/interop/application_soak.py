@@ -125,6 +125,8 @@ def sample_process(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--quiet-client', action='store_true', help='warn-level client logs for like-for-like timing runs')
+    parser.add_argument('--quiet-seconds', type=float, default=65)
     parser.add_argument('--implementation', choices=['rust-current', 'rust-baseline', 'xray'], default='rust-current')
     parser.add_argument('--direct', action='store_true', help='diagnostic origin-only control; not proxy acceptance')
     parser.add_argument('--seconds', type=float, default=3600)
@@ -137,7 +139,7 @@ def main():
     processes, servers, logs = [], [], []
     stop = threading.Event()
     samples, latencies = [], []
-    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "passed": False, "websockets": "15.0.1",
+    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
               "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "workloads": {}, "limitations": ["no packet-loss/netem or real NAT impairment", "no production credentials or AI provider traffic"]}
@@ -174,7 +176,7 @@ def main():
                     "serverName": "localhost", "fingerprint": "chrome", "publicKey": values['RRC_INTEROP_PUBLIC_KEY'], "shortId": values['RRC_INTEROP_SHORT_ID']}}}]}))
             command = [str(args.binary.resolve()), 'run', '-config', str(config.resolve())]
         else:
-            command = [str(args.binary.resolve()), 'run', '--config', str(config.resolve()), '--log-level', 'debug']
+            command = [str(args.binary.resolve()), 'run', '--config', str(config.resolve()), '--log-level', 'warn' if args.quiet_client else 'debug']
         client = subprocess.Popen(command, stdout=client_log, stderr=subprocess.STDOUT)
         processes.append(client)
         for _ in range(100):
@@ -214,7 +216,7 @@ def main():
                     if short: return n
                     # App-level quiet > keepalive window on long runs. Native TCP
                     # probes remain enabled; no proxy-generated WebSocket pings.
-                    quiet = min(65 if n % 10 == 0 else .1, max(0, until - time.monotonic()))
+                    quiet = min(args.quiet_seconds if n % 10 == 0 else .1, max(0, until - time.monotonic()))
                     await asyncio.sleep(quiet)
                 return {"messages": n, "wall_seconds": time.monotonic() - began}
 
@@ -294,7 +296,7 @@ def main():
             if event.get('event') == 'connection_completed' and 'downlink_direct' in event:
                 server_modes.add('direct' if event['downlink_direct'] else 'non-direct')
         assert args.direct or {'direct', 'non-direct'} <= server_modes, f'missing server transitions: {server_modes}'
-        if args.implementation == 'rust-current' and not args.direct:
+        if args.implementation == 'rust-current' and not args.direct and not args.quiet_client:
             assert {'direct', 'outer'} <= modes, f'missing client transitions: {modes}'
         result['server_modes'] = sorted(server_modes)
         result['observed_downlinks'] = sorted(modes)
