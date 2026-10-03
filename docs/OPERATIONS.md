@@ -310,7 +310,7 @@ git clone --quiet https://github.com/jacek4yang/rust-reality /tmp/v201
 git -C /tmp/v201 checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
 cargo build --release --locked --manifest-path /tmp/v201/Cargo.toml --bin rust-reality
 
-# 2. Start cover + echo + fault targets + entry node, and read the handoff.
+# 2. Start cover + echo + fault targets + TLS origins + entry node, and read the handoff.
 INTEROP_BINARY=/tmp/v201/target/release/rust-reality scripts/interop/upstream-server.sh &
 until [ -s target/interop/handoff.env ]; do sleep 0.5; done
 set -a; . target/interop/handoff.env; set +a
@@ -325,6 +325,16 @@ cargo test --locked --test interop_v201 -- --ignored --test-threads=1 --nocaptur
 `target/interop/handoff.env`, so the two halves never agree on secrets by hand. It also
 starts the four destination-side fault shapes (`late`, `drop`, `rst`, `truncate`) and one
 port nothing listens on, because a test cannot open a listener the node dials from.
+
+And two nested-TLS origins, which is how the Vision transition gets proven rather than
+asserted: `tls_chain.sh` mints a CA and a leaf larger than one 16 KiB record into
+`target/interop/tls/`, and `tls_origins.py` serves that leaf over TLS 1.3 on
+`RRC_INTEROP_TLS13` and over TLS 1.2 only on `RRC_INTEROP_TLS12`. The 1.3 origin's
+`Certificate` therefore spans several `application_data` records, so the node takes
+`Direct` *inside* the handshake, while the 1.2 origin takes `End` and must keep sealing.
+`tls_client.py` is the application on the far side of the relay — a genuine TLS peer, so
+the certificate verification and the AEAD that decide the claim are OpenSSL's, not ours
+(`RRC_INTEROP_PYTHON` overrides the interpreter).
 
 The soak's report is the line to read. This one is the actual output of the command
 above, run on Linux against the pinned `v2.0.1` binary at the default 50 ms pacing
