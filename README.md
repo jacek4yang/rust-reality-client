@@ -76,11 +76,13 @@ the interop gate runs.
 
 Wire behaviour is derived from the upstream source and proven by tests, not from
 memory: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) records the exact upstream file
-and line for each requirement, and `tests/interop_v201.rs` runs 19 live tests
+and line for each requirement, and `tests/interop_v201.rs` runs 22 live tests
 against the real node (handshake, foreign-key rejection, a Vision round trip
 through the echo target, half-close, both inbounds, the scheduler routing past a
-node that cannot authenticate, five destination fault shapes, an idle tunnel
-held past the keepalive window, a connect storm, and a soak).
+node that cannot authenticate, five destination fault shapes, a nested TLS 1.2
+and a nested TLS 1.3 destination with the record-layer transition each one
+provokes, an idle tunnel held past the keepalive window, a session quiet past
+that same window, a connect storm, and a soak).
 
 `cargo test --locked --test interop_v201 -- --ignored --test-threads=1` is the
 gate, and CI's `interop` job runs it against a node built from the commit above
@@ -382,38 +384,58 @@ that saw it — the second fault is what tells you the first was not alone.
 
 ## 13. TCP keepalive
 
-Every data socket — the node connection — gets `TCP_NODELAY` and kernel
-keepalive armed **before any byte is written**, because a socket that negotiates
-a REALITY handshake in sixteen record-sized bursts is exactly where `NODELAY`
-earns its keep, and because keepalive timers count from the first silence rather
-than from whenever somebody remembers to arm them.
+Every data socket gets `TCP_NODELAY` and kernel keepalive armed **before any byte
+is written** — both halves of a carried connection, not just the node side, because
+a peer that died without a FIN is just as invisible on the socket your application
+owns as on the tunnel. The one policy lives in `src/transport/socket.rs` and is
+applied by `src/transport/dial.rs:205` and `src/serve.rs:562`. Arming early matters
+because a socket that negotiates a REALITY handshake in sixteen record-sized bursts
+is exactly where `NODELAY` earns its keep, and because keepalive timers count from
+the first silence rather than from whenever somebody remembers to arm them.
 
 | Knob | Value |
 | --- | --- |
 | `KEEPALIVE_IDLE` | 30 s |
 | `KEEPALIVE_INTERVAL` | 10 s |
 | `KEEPALIVE_COUNT` | 3 probes |
-| Detection | **60 s** of silence |
+| Detection of a silent blackhole | **59.1 s measured**, ~60 s of arithmetic |
 
-Sixty seconds is chosen deliberately to precede the node's own 120 s write-stall
-bound, so this client learns a peer is gone from its own socket rather than
-losing the race for the reason. A test asserts both the arithmetic and the
-inequality.
+The measured number is the first row of the six-run table in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md): a path that stopped delivering anything,
+with a read parked on it and no userspace timer anywhere in the relay, produced
+`ETIMEDOUT` on both ends 59.1 s later. Sixty seconds is chosen to stay well inside
+the node's own 120 s write-stall bound (`src/io_activity.rs:14` upstream), so this
+client learns a peer is gone from its own socket rather than losing that race, and a
+test asserts both the arithmetic and the inequality.
 
-Deliberately absent:
+Tolerance is a separate number and it is not a duration. An outage that swallowed one
+probe slot was survived; an outage that covered all three slots killed the session
+**even after connectivity returned**, because both ends had already been told the
+socket was dead. A socket that is *carrying* bytes is not subject to that at all — a
+5 s outage in the middle of a 1 MiB write cost 6.5 s and the transfer completed on
+retransmission alone. Deliberately absent:
 
-* **No `TCP_USER_TIMEOUT`.** It is attractive and it kills exactly the long-lived
-  low-rate connections this client exists to protect: a stalled write is supposed
-  to be reported, not silently aborted.
-* **No userspace read-idle timeout for healthy authenticated connections.** A
-  quiet tunnel is a working tunnel. An idle SSE stream is left alone for as long
-  as it stays quiet, and only the kernel probes decide whether it is alive.
-* Local sockets get `TCP_NODELAY` (a proxy that adds a Nagle round trip to every
-  small request looks like a broken network) and nothing else.
+* **No `TCP_USER_TIMEOUT`.** This is not because it endangers quiet connections:
+  per `tcp(7)` it bounds data left unacknowledged or untransmitted behind a zero
+  window, so a quiet socket with an empty send queue cannot trigger it. It is
+  because on a socket that *does* have a pending write it "will override keepalive",
+  which would replace the 59 s verdict above with a shorter one — and two of the six
+  measured runs are connections that trade would have broken. Unarmed, and no global
+  default touched.
+* **No userspace read-idle timeout for healthy authenticated connections.** A quiet
+  tunnel is a working tunnel. An idle SSE stream is left alone for as long as it
+  stays quiet, and only the kernel probes decide whether it is alive.
+* **No invented write-stall timer.** The copy loop holds one fixed 8 KiB buffer per
+  direction and cannot pull the next chunk until the current one is accepted, so a
+  peer that stops reading stops the flow instead of filling a queue. Acceptance into
+  the local kernel's send buffer is *not* proof the peer got the bytes: 64 KiB was
+  accepted in 0 ms and read 7994 ms later.
 
 Half-close is forwarded, not truncated: a client's `FIN` reaches the destination
-without cutting the reverse direction, and the node's `close_notify` reads as end
-of stream rather than as an error.
+without cutting the reverse direction, and the node's `close_notify` reads as end of
+stream rather than as an error. A WebSocket `Ping`, `Pong` or `Close` is payload to
+this proxy — carried byte for byte, never generated on the application's behalf, and
+never taken as proof that the service behind the node is healthy.
 
 ## 14. Diagnostics
 
@@ -614,6 +636,14 @@ Out of scope for v1, deliberately, and not "not yet":
 
 Known rough edges worth naming:
 
+* A session that stays **quiet** through an outage covering all three probe slots —
+  about 40 s of the armed 30/10/3 window — is lost even when the path heals inside a
+  minute, because both ends' kernels have already been told the socket is dead
+  (section 13). A session that is *carrying* bytes does not have that failure: the
+  same length outage during a bulk write cost 6.5 s and the transfer completed.
+  Raising the tolerance means raising `KEEPALIVE_COUNT` or `_INTERVAL`, which slows
+  blackhole detection by the same amount, and that trade is measured rather than
+  guessed at.
 * One `userId` per node, because that is what the file shape describes.
 * `doctor` cannot distinguish clock skew from a wrong key or short id on a failed
   handshake — it says so rather than guessing (section 14).

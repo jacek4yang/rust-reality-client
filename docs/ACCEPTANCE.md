@@ -16,8 +16,14 @@ Two conventions make the results comparable:
   exception by design: they executed `main` at `8ba078b` and then at `aeac97d`, which is the
   same content plus the documents and one test-only change inside a
   `cfg(target_os = "linux")` block — nothing that reaches the wire, and the `interop` job's
-  19 tests passed on both sides of it. `git describe` on a clean checkout of a tagged commit
-  yields the tag, which is what a release bundle should be named after.
+  19 tests passed on both sides of it. Boxes 34–37 are the other exception: they were
+  added by the socket-policy work at `981ef27`, after the runs above were recorded, and
+  each one's own command and output is quoted under it. They set socket options rather
+  than Vision framing, so none of the wire evidence above is re-measured by them; the
+  option read-backs and the hot-path greps run on any host, and the six-run loss table
+  was measured on Linux 6.18.33 with the binary built from that commit. `git describe`
+  on a clean checkout of a tagged commit yields the tag, which is what a release bundle
+  should be named after.
 * **The node.** An unmodified `rust-reality` at
   `e3fc3dc36b931baec042074d6c88e928caf6941f` (tag `v2.0.1`), built with `--locked` by
   `scripts/interop/upstream-server.sh`. `git -C .upstream/rust-reality status --porcelain`
@@ -108,19 +114,21 @@ The four hosts the commands were run on:
   ```
 
   ```text
-  test result: ok. 19 passed; 0 failed; 0 ignored; … finished in 159.24s
+  test result: ok. 22 passed; 0 failed; 0 ignored; … finished in 224.29s
   ```
 
   And the same suite from Windows against the same node over the WSL NAT address
   (`RRC_INTEROP_ADDR=172.30.96.85:14443`, log in `target/interop-windows.log`):
 
   ```text
-  test result: ok. 19 passed; 0 failed; … finished in 99.38s
+  test result: ok. 22 passed; 0 failed; 0 ignored; … finished in 224.61s
   ```
 
-  Nineteen live connections-shapes: handshake, Vision both directions, half-close, the
-  fault matrix, keepalive-idle, the storm and the soak. Two platforms, one node, no
-  test skipped or loosened between them.
+  Twenty-two live connection shapes: handshake, Vision both directions, the two
+  nested-TLS transitions that decide `End` against `Direct`, half-close, the fault
+  matrix, keepalive-idle, a session held quiet past the armed keepalive window and
+  then used again, the storm and the soak. Two platforms, one node, no test skipped
+  or loosened between them.
 
 - [x] **6. SOCKS5 TCP works.** `a_socks5_connect_is_tunneled_through_v201` — greeting,
   `CONNECT`, the bound address in the reply is the address the node actually reached,
@@ -208,7 +216,7 @@ The four hosts the commands were run on:
   no idle timer exists to fire) and
   `a_transfer_larger_than_the_buffer_arrives_whole_and_is_counted_apart`, which is the
   asymmetric shape: one direction far larger than `RELAY_BUFFER`. In the soak below, a
-  session opened before the window is still alive after 1063 other connections came and
+  session opened before the window is still alive after 1074 other connections came and
   went.
 
 - [x] **13. TCP half-close is correct.** `half_close_sends_the_alert_the_node_reads_as_a_fin`
@@ -217,6 +225,10 @@ The four hosts the commands were run on:
   (`src/transport/relay.rs`), and live in both directions:
   `half_close_reaches_the_destination_and_ends_the_tunnel` and
   `a_destination_that_hangs_up_without_a_word_arrives_as_an_end_of_stream`.
+
+What the shipped socket options are proved to hold — on both halves, across address
+selection, across the Vision transition, and on a path that really drops every
+packet — is boxes 34 to 37, at the end of this list.
 
 ## Multi-node behavior
 
@@ -228,8 +240,8 @@ The four hosts the commands were run on:
   Vision padding, never into which node or address is tried.
 
 - [x] **15. The sticky primary works.** `the_dwell_window_holds_the_route_still`, and the
-  live evidence is the soak's own line: one named node served every one of 1063
-  connections in 120 s while a second configured node existed (`primary primary with 1063
+  live evidence is the soak's own line: one named node served every one of 1074
+  connections in 120 s while a second configured node existed (`primary primary with 1074
   successes and 0 failures`).
 
 - [x] **16. Hysteresis prevents flapping.** Six tests, one per rule that has to hold a
@@ -259,7 +271,7 @@ The four hosts the commands were run on:
   `a_fast_lead_is_never_given_company` (a 5 ms leader gets no challenger at all),
   `one_configured_node_is_never_hedged`, and `a_late_lead_is_replaced_by_its_challenger`
   for the case the delay exists to catch. The measured consequence is in the soak line:
-  `hedged 0` over 1063 connections on a healthy path — hedging costs nothing when nothing
+  `hedged 0` over 1074 connections on a healthy path — hedging costs nothing when nothing
   is late.
 
 - [x] **19. A losing hedge is cancelled safely.** `a_late_lead_is_replaced_by_its_challenger`
@@ -282,11 +294,16 @@ The four hosts the commands were run on:
   dual-stack outage: a machine whose IPv6 breaks halfway is not something the fixture can
   provide, and the README does not claim otherwise.
 
-- [x] **21. Keepalive is configured.** `src/transport/socket.rs` (4 tests) sets
-  `SO_KEEPALIVE` with `KEEPALIVE_IDLE` 30 s, `KEEPALIVE_INTERVAL` 10 s and 3 probes on the
-  node-facing socket, and `the_winner_leaves_with_the_socket_options_armed` pins that the
-  socket handed on still carries them. The live 35-second idle test above is the point of
-  the setting: the tunnel is still there after longer than a NAT mapping would have lasted.
+- [x] **21. Keepalive is configured, on both halves.** `src/transport/socket.rs`
+  (6 tests) sets `SO_KEEPALIVE` with `KEEPALIVE_IDLE` 30 s, `KEEPALIVE_INTERVAL` 10 s
+  and 3 probes, and the one caller of that policy is reached from both edges:
+  `src/transport/dial.rs:205` for the dialled tunnel and `src/serve.rs:562` for the
+  accepted local socket, so the half the application owns is armed like the half the
+  node owns. `the_winner_leaves_with_the_socket_options_armed` pins that the socket
+  handed on after an address race still carries them. The live 35-second idle test
+  above is the point of the setting: the tunnel is still there after longer than a
+  NAT mapping would have lasted. Box 34 is the read-back version of this claim, and
+  box 35 is what the window measures rather than what it says.
 
 - [x] **22. No fake migration of an established TCP session.**
   `a_session_that_dies_mid_download_is_reported_and_never_retried` is this box. The
@@ -359,14 +376,14 @@ The four hosts the commands were run on:
   ```
 
   ```text
-  SOAK 120.097172739s: 1063 connections, 32953 bytes down, p50 60.804906ms
-    p95 64.80683ms p99 68.64482ms (fastest 58.553713ms, slowest 76.725247ms),
-    hedged 0 won 0, long-lived session still up, primary primary with 1063
+  SOAK 120.035904576s: 1074 connections, 33294 bytes down, p50 60.518341ms
+    p95 63.541121ms p99 68.651451ms (fastest 56.452721ms, slowest 73.693634ms),
+    hedged 0 won 0, long-lived session still up, primary primary with 1074
     successes and 0 failures
-  SOAK footprint: descriptors 13 -> 13, resident 7864 KiB -> 7992 KiB, threads 2 -> 2
+  SOAK footprint: descriptors 13 -> 13, resident 8044 KiB -> 8172 KiB, threads 2 -> 2
   ```
 
-  1063 tunnels in two minutes against a live node: the descriptor count read out of
+  1074 tunnels in two minutes against a live node: the descriptor count read out of
   `/proc/self/fd` is identical before and after (the test asserts `DESCRIPTOR_SLACK` = 16),
   the thread count does not move, and the resident set grows 128 KiB across the window.
   The 60-second Windows run is `754 connections … 754 successes and 0 failures`. Task
@@ -394,16 +411,18 @@ The four hosts the commands were run on:
   ```
 
   ```text
-  unittests src\lib.rs      … 300 passed; 0 failed
+  unittests src\lib.rs      … 309 passed; 0 failed
   tests\cli.rs              … 17 passed; 0 failed
   tests\fault_injection.rs  … 8 passed; 0 failed
   tests\fuzz_smoke.rs       … 4 passed; 0 failed
-  tests\serve.rs            … 6 passed; 0 failed
-  tests\interop_v201.rs     … 19 ignored (they need a live node; see box 5)
+  tests\serve.rs            … 8 passed; 0 failed
+  tests\interop_v201.rs     … 22 ignored (they need a live node; see box 5)
+  doc-tests                 … 1 passed; 0 failed
   test result: ok.          … 0 failed
   ```
 
-  335 offline tests, and the 19 that cannot run offline run in box 5 on two platforms.
+  346 offline tests plus one doctest, and the 22 that cannot run offline run in box 5
+  on two platforms.
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
 
@@ -527,6 +546,144 @@ The four hosts the commands were run on:
   missing or a stray file that is not fails the check rather than being ignored. The
   `checksums` job runs the same two commands over the three downloaded artifacts.
 
+## Socket policy and quiet streams
+
+These four boxes are the long-connection claims that needed a measurement rather
+than a test: what the shipped keepalive window actually does on a path that drops
+everything, and what each socket is proved to hold.
+
+- [x] **34. The options are read back, on both halves, and they survive address
+  selection and the Vision transition.**
+
+  There is one place that sets them — `src/transport/socket.rs:90`, `TCP_NODELAY`
+  plus `SO_KEEPALIVE` at 30 s / 10 s / 3 — and
+  `grep -rn "set_tcp_keepalive\|set_tcp_nodelay" src/` names no other production
+  setter. Two call sites consume it: `src/transport/dial.rs:205` for the dialled
+  tunnel and `src/serve.rs:562` for the accepted local socket. The earlier build got
+  the second one wrong — it called `set_nodelay` on the local half and discarded the
+  result, so that half had no probes at all — and
+  `admission_arms_the_local_socket_too` is the regression.
+
+  `probe` is the `getsockopt` that reads the answer back, and the tests use it
+  rather than the call: `the_window_is_the_60_seconds_the_server_outlives`,
+  `a_sub_second_window_becomes_one_second_rather_than_zero`,
+  `the_window_reads_back_off_both_halves_of_a_live_connection` and
+  `an_unconfigured_socket_reads_back_as_unconfigured` — the last is what stops the
+  third from passing on a kernel default. Address selection is
+  `the_winner_leaves_with_the_socket_options_armed` (`src/transport/dial/tests.rs`),
+  which asserts about the socket that won the race, not the candidates. Across the
+  transition, the two live nested-TLS tests read `Applied` off the tunnel *before*
+  the session takes it and again *after* the crossing, and require equality *and*
+  non-defaultness:
+
+  ```text
+  test a_tls_1_2_destination_ends_framing_but_keeps_the_record_layer ... ok
+  test a_tls_1_3_destination_ends_framing_and_the_record_layer_too ... ok
+  ```
+
+  The before-crossing read is what makes that a claim: without it, a tunnel that was
+  never tuned would fail nothing. The platform asymmetry is recorded rather than
+  smoothed over — `TCP_KEEPIDLE` and `TCP_KEEPINTVL` have no Windows spelling, so
+  `Applied` holds `Option` and reports `unread` instead of guessing back the value
+  it asked for.
+
+- [x] **35. Idle-blackhole detection and outage tolerance were measured separately,
+  on a path that drops everything.**
+
+  ```sh
+  cargo build --locked --example keepalive_window
+  scripts/interop/keepalive_window.sh target/debug/examples/keepalive_window 240
+  ```
+
+  The script reads the armed window out of the `src/transport/socket.rs` of the
+  checkout it lives in, and refuses to start when it cannot. When the binary under
+  test was built from a different tree — the WSL build copy above is one —
+  `RRC_SOCKET_SOURCE` names that tree's `src/transport/socket.rs`, so the schedule
+  is still checked against the source the binary actually compiled.
+
+  Two network namespaces, one veth, `tc netem loss 100%` on both egresses — one
+  direction alone would leave the peer free to answer a probe with an RST, which is a
+  different experiment. Root is needed for `ip netns` and `tc`; nothing outside the
+  two namespaces is created or changed, and the script deletes both the qdiscs and
+  the namespaces on exit. Host: Linux 6.18.33 (WSL2), `tcp_retries2` at its
+  distribution default of 15 — read, never written.
+
+  | Run | What happened | Measured |
+  | --- | --- | --- |
+  | `blackhole-park` | down at +2 s, never healed, one parked read | `ETIMEDOUT` at both ends, **59.1 s after the path went down** |
+  | `outage-20s-one-probe-lost` | down 15–35 s, so the probe at 30 s was lost | **alive** at +45 s |
+  | `outage-40s-three-probes-lost` | down 15–55 s, so all three probe slots were lost | far end dead at **60.98 s**; the client's write at +70 s returned `ETIMEDOUT` on arrival — **the path had healed at 55 s and it did not matter** |
+  | `stalled-peer-acceptance` | 64 KiB to a peer that stopped reading | accepted in **0 ms**, delivered **7994 ms** later |
+  | `stalled-peer-backpressure` | 1 MiB to the same peer | the write stalled **7980 ms**, then the payload arrived byte-identical |
+  | `outage-during-bulk` | a 5 s outage during a 1 MiB write | the write cost **6515 ms** and the transfer **completed** |
+
+  What the six rows establish, in order: detection is the armed 30 + 3 × 10 window
+  and nothing else — `carry` arms no timer, so the 59.1 s came from the kernel.
+  Tolerance is decided by *which probe slots an outage covers*, not by its length,
+  which is why a 40 s blackout killed a session that a 20 s blackout left working,
+  and why the dead session was dead after its connectivity had returned. A socket
+  carrying bytes is protected by retransmission rather than by keepalive at all —
+  that is the difference between the last row and the third. And `write_all`
+  returning is the local kernel's acceptance, eight seconds away from the peer having
+  read those bytes.
+
+  What they do not establish: no real NAT, ISP or middlebox was involved, and these
+  are properties of *this* armed window. They are the price sheet for a change to
+  `KEEPALIVE_*`, not an argument against making one.
+
+- [x] **36. There is no read-idle timeout to fire, and no `TCP_USER_TIMEOUT` is
+  set.**
+
+  `grep -rn "user_timeout\|USER_TIMEOUT" src/` returns nothing: no socket arms it, no
+  system default is read or written, and no congestion control is touched. `carry`
+  constructs no timer, and the behavioural claim is
+  `a_quiet_tunnel_is_left_alone_for_as_long_as_it_stays_quiet` — a mocked two-hour
+  silence, then an assertion that the relay task is *still parked* and that bytes
+  still cross in both directions afterwards. Against a live node,
+  `a_session_quiet_past_its_keepalive_window_still_carries_bytes` holds a real tunnel
+  quiet past the armed window and round-trips again.
+
+  Why `TCP_USER_TIMEOUT` is left alone is in `tcp(7)` rather than in opinion: it
+  bounds data that "may remain unacknowledged, or buffered data may remain
+  untransmitted (due to zero window size)", it "will override keepalive" when both
+  are set, and it "has no effect on when TCP retransmits a packet, nor when a
+  keepalive probe is sent". It therefore cannot end a quiet connection whose send
+  queue is empty — the usual claim about it is wrong — but on a socket with a pending
+  write a short value replaces the ~60 s verdict box 35 measured with a faster one,
+  and the two surviving runs in that table are the connections such a trade would
+  have destroyed. Unarmed is the decision; re-arming it requires those six runs on
+  both sides of the change.
+
+  The mechanism split the section exists to make explicit: **A** bounded setup
+  (`DNS_BUDGET` 5 s, `CONNECT_BUDGET` 10 s, `FIRST_BYTE_BUDGET` 15 s), **B** kernel
+  liveness (30/10/3 plus the system's retransmission budget), **C** pending writes
+  (no timer here, and a fixed 8 KiB buffer per direction that cannot grow — a stalled
+  writer stops pulling instead of queueing), **D** application deadlines and
+  heartbeats, which this proxy neither imposes nor impersonates: a WebSocket Ping,
+  Pong or Close is payload, carried byte for byte and never synthesised here. A
+  keepalive answer from the node is evidence about the node's TCP stack, not about
+  the destination or the AI service behind it.
+
+- [x] **37. The hot path's cost is fixed and greppable.**
+
+  `RELAY_BUFFER` is 8 KiB per direction (`src/transport/relay.rs:57`), and the copy is
+  tokio's `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
+  connection and reuses them for every chunk. A Vision session holds four buffers,
+  each reserved at construction (`src/transport/session.rs:253-257`); the three
+  `resize` calls in that file grow within the reservation. The codec's production
+  region allocates nothing — no `Vec::new`, `to_vec`, `format!` or `clone` anywhere
+  above the test module at `src/protocol/vision.rs:579` — and nothing in
+  `relay.rs`, `session.rs` or `vision.rs` logs:
+
+  ```sh
+  grep -rn "logger\|log::\|tracing" src/transport/relay.rs src/transport/session.rs src/protocol/vision.rs
+  ```
+
+  returns nothing. There is one task per connection on the shared runtime, no second
+  runtime and no queue between the two sockets, so backpressure arrives as unread
+  socket bytes rather than as memory. Box 26's footprint line is the same claim over
+  1074 connections: descriptors 13 → 13, threads 2 → 2.
+
 ---
 
 ## What this file does not establish
@@ -539,7 +696,10 @@ The four hosts the commands were run on:
   `aarch64-unknown-linux-gnu` need linkers this VM does not have and no runner has built.
 * That a real-world dual-stack outage or a real NAT box was involved. Box 20 is a modelled
   route table; box 12 and box 21 use the client's own keepalive timer against a live node,
-  which is the closest thing to a NAT that a fixture can be.
+  and box 35 drops every packet on a private point-to-point link the test builds itself.
+  That is a blackhole, but it is still *this* kernel on *this* veth: a middlebox that
+  quietly stops forwarding after five minutes, or an ISP that reshapes one direction, is
+  not reproduced by anything here.
 * That the fault matrix covers more than the seven failure families the taxonomy has. It
   covers exactly those seven, both inbound edges, and a live node for four destination
   shapes.

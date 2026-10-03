@@ -375,10 +375,87 @@ branch to a real node.
 
 ## Liveness
 
-`docs/en/architecture.md` §1 and `src/transport/tcp.rs`: every data socket on
-the server carries `SO_KEEPALIVE` with 30 s idle / 10 s interval / 3 probes.
-Authenticated sessions have **no** read-idle timeout: the shared activity flag
-is sampled every 5 minutes and only a *completely* idle session expires, so an
-asymmetric SSE stream survives indefinitely (`architecture.md` §4, ADR 0030).
-There is a separate 120 s pending-**write** stall deadline. The client mirrors
-the keepalive baseline and must not impose a userspace read-idle timeout.
+Upstream answers three different questions with three different mechanisms, and
+the client keeps them apart for the same reason: the common way to break a
+long-lived AI session is to answer one of them with another's timer. Bare paths
+below are v2.0.1's, as everywhere in this file; the two places that cite this
+repository say so in the sentence.
+
+### What the node puts on a data socket
+
+v2.0.1's `configure_accepted` applies `TCP_NODELAY` and the keepalive backstop to an
+accepted stream (v2.0.1 `src/transport/tcp.rs:339-374`, whose own test reads
+`SO_KEEPALIVE` back and asserts "accepted streams must arm keepalive"), and the same
+three values — 30 s idle, 10 s between probes, 3 probes — are what every data socket
+carries (v2.0.1 `docs/en/architecture.md` §1). This client keeps one copy of that
+policy in `src/transport/socket.rs` (`KEEPALIVE_IDLE` at `:36`, `KEEPALIVE_INTERVAL`
+at `:41`, `KEEPALIVE_COUNT` at `:46`, and a 1 s floor at `:54`/`:175` because a zero
+`TCP_KEEPINTVL` is a different program, not a faster one) and applies it to both
+halves of a carried connection: the dialled tunnel at `src/transport/dial.rs:205` and
+the accepted local socket at `src/serve.rs:562`.
+
+These are first-hop facts about the socket between this client and the node. A
+keepalive answer from `LINE` says nothing about `LANDING` or about the AI service
+behind it: the probe is answered by the peer's TCP stack, which is alive as long
+as it has a socket, whether or not anything above it still works. End-to-end
+health is only ever shown by the application's own bytes moving — including its
+own WebSocket Ping/Pong, which this client carries as payload and never
+generates.
+
+### Reads after authentication are untimed, deliberately
+
+`io_activity` states the design in its own first seven lines: a successful I/O
+event is "one relaxed store, never a clock read, timer reset, allocation, or
+wakeup", one coordinator samples the flag at window boundaries, "Writes have a
+separate stall deadline" (`src/io_activity.rs:1-7`), and the window is
+`SESSION_IDLE_WINDOW` = 300 s (`:17`). A *completely* idle session is therefore
+reclaimed within two windows, while an asymmetric stream — the server still
+writing, the client silent for ten minutes — never qualifies, which is what ADR
+0030 exists for (`docs/en/architecture.md` §4). The TLS 1.3 layer spells out the
+consequence: "Attaching session activity removes read-idle enforcement: either
+direction can keep the connection alive, including while a TLS record is
+incomplete… No timer is reset, allocated or polled for an authenticated read"
+(`src/protocol/reality/tls13/idle.rs:1-8`).
+
+So: quiet is not the same as broken, and connection age is not a failure signal.
+This client arms no per-direction read-idle timeout, and its `carry`
+(`src/transport/relay.rs`, this repository) constructs no timer at all — the shape
+v2.0.1's own relay takes when the stall window is `None`
+(v2.0.1 `src/transport/tcp_relay.rs:715`).
+
+### A pending write is a separate, finite question
+
+`WRITE_STALL_TIMEOUT` = 120 s (`src/io_activity.rs:13-14`) is described upstream
+as a write-stall bound "unrelated to fallback". It is armed per chunk and shared
+by that chunk's read and write, so "steady progress never times out, while a peer
+that stalls for the whole window ends the direction with
+`io::ErrorKind::TimedOut` instead of parking on its permit forever", and `None`
+"constructs no timer at all" (`src/transport/tcp_relay.rs:709-715`). The
+rationale for separating it from reads is in the same function's comment:
+"Quiet reads are not stalled writes. TCP keepalive and peer FIN govern raw
+lifetime, including when only the other direction moves" (`:735-736`).
+
+This client does not arm that bound, and the choice is stated rather than implied:
+the traffic it is tuned for includes a model streaming tokens into a socket the
+application is reading slowly, where a bound picked for a synchronous request
+would be the thing that ends a healthy transfer. What keeps that from becoming an
+unbounded queue is not a timer — it is that this repository's copy loop
+(`src/transport/relay.rs`, `RELAY_BUFFER`) has one fixed 8 KiB buffer per direction
+and cannot read the next chunk until the current one is accepted, so a stalled
+writer stops pulling and backpressure lands where TCP already handles it: the
+source's socket receive buffer. What ends such a wait, if it ever does,
+is the kernel's own budget for unacknowledged data (`tcp_retries2`, 13 to 30 minutes
+at Linux's default of 15) rather than a deadline this program invented — and that is
+the one case in this section this build did *not* measure: the runs behind it in
+`docs/OPERATIONS.md` stall a peer for eight seconds and then resume it, which is what
+ordinary backpressure looks like, not what a permanently unread peer looks like.
+
+### Setup deadlines stay finite
+
+None of the above applies before a session exists. Address resolution, the dial
+race, REALITY authentication and the VLESS request/response all keep finite
+bounds in this repository — `DNS_BUDGET` 5 s and `CONNECT_BUDGET` 10 s
+(`src/transport/dial.rs:45`, `:53`), `FIRST_BYTE_BUDGET` 15 s
+(`src/handoff.rs:78`) — because an unanswered setup question has no value in being
+asked longer, and a stuck handshake that is not released is a slot that nobody
+else can use.
