@@ -12,9 +12,12 @@ Two conventions make the results comparable:
   counters, the soak measurements, the `Direct` test, the README and the two documents
   beside it. Nothing on the wire changed between `fa0214f` and the runs quoted here, and
   the live suites were re-run from that content after it was committed, at `d25d8cf`,
-  which is also the commit the artifact below was packaged from. `git describe` on a clean
-  checkout of a tagged commit yields the tag, which is what a release bundle should be
-  named after.
+  which is also the commit the artifact below was packaged from. Box 30's runs are the
+  exception by design: they executed `main` at `8ba078b` and then at `aeac97d`, which is the
+  same content plus the documents and one test-only change inside a
+  `cfg(target_os = "linux")` block — nothing that reaches the wire, and the `interop` job's
+  19 tests passed on both sides of it. `git describe` on a clean checkout of a tagged commit
+  yields the tag, which is what a release bundle should be named after.
 * **The node.** An unmodified `rust-reality` at
   `e3fc3dc36b931baec042074d6c88e928caf6941f` (tag `v2.0.1`), built with `--locked` by
   `scripts/interop/upstream-server.sh`. `git -C .upstream/rust-reality status --porcelain`
@@ -41,9 +44,11 @@ The four hosts the commands were run on:
   ```
 
   No `path` dependencies and no `[patch]`: the client depends only on crates.io
-  versions, so `cargo build` works from a clone with nothing else present. 53 tracked
-  files, no vendored server code — `.upstream/` is gitignored and is used only by the
-  interop fixture and the protocol notes.
+  versions, so `cargo build` works from a clone with nothing else present. 59 tracked
+  files at `aeac97d`, counted again because this line was written when it was 53 and the
+  license texts, the systemd unit and the two workflow files arrived after that. No vendored
+  server code — `.upstream/` is gitignored and is used only by the interop fixture and the
+  protocol notes.
 
 - [x] **2. No Xray process at runtime.**
 
