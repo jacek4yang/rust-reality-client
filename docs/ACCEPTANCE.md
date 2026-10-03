@@ -1,9 +1,10 @@
 # Acceptance
 
 Every box below is one line of the release checklist, the command that either fills it
-or fails to, and the output that command actually produced. Two boxes stay open and say
-why. Nothing here is a promise about a future run: a box is checked because a log file in
-`target/` holds the line quoted under it.
+or fails to, and the output that command actually produced. Every box is now checked, and
+box 30 was the last to get there: it stayed open until a GitHub runner had executed the
+pipeline. Nothing here is a promise about a future run: a box is checked because a log file
+in `target/` or an Actions run holds the line quoted under it.
 
 Two conventions make the results comparable:
 
@@ -20,13 +21,14 @@ Two conventions make the results comparable:
   is empty, which is the difference between "we tested against v2.0.1" and "we tested
   against a server we edited until our client passed".
 
-The three hosts the commands were run on:
+The four hosts the commands were run on:
 
 | Where | What | Toolchain |
 | --- | --- | --- |
 | Windows 10 x64 (`D:\Workspace\rust-reality-client`) | the repository, the local suite, one live interop run | rustc/cargo 1.98.1 MSVC |
-| WSL2 Ubuntu, kernel 6.18.33.1 (`/home/jacek/rrclient`) | a build copy of the same tree: Linux checks, the live interop run with the `/proc` measurements, the release artifact | rustc/cargo 1.98.0 GNU |
+| WSL2 Ubuntu, kernel 6.18.33.1 (`/home/jacek/rrclient`) | a build copy of the same tree: Linux checks, the live interop run with the `/proc` measurements, the release artifact | rustc/cargo 1.98.0 and 1.98.1 GNU |
 | The same WSL2 VM | the `v2.0.1` node and the fault targets, listening on `127.0.0.1:14443`…`:14449` | `rust-reality 2.0.1` |
+| GitHub-hosted `ubuntu-24.04` | the four gates of `ci.yml`, run for real; see box 30 | rustc/cargo 1.98.1 GNU, as pinned by `env.RUST` |
 
 ---
 
@@ -365,14 +367,49 @@ The three hosts the commands were run on:
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
 
-- [ ] **30. CI is green.** **Not claimed.** `.github/workflows/ci.yml` defines six jobs —
-  `lint`, `test`, `msrv`, `interop`, `artifacts`, `checksums` — and both workflow files
-  parse (`python -c "yaml.safe_load(...)"` → 6 and 4 top-level keys). What is *not*
-  available is a run: this repository has no remote, so `gh` has nothing to query and no
-  Actions run exists to point at. Each job's commands were instead executed by hand, on
-  both platforms, and are boxes 5, 26, 27, 28, 29 and 32. The `interop` job's own steps
-  are the same commands as box 5, so the first push to a remote will either reproduce
-  them or fail visibly.
+- [x] **30. CI is green.** GitHub ran the pipeline, and the first execution earned the box
+  by failing. Run [`37058816261`](https://github.com/jacek4yang/rust-reality-client/actions/runs/37058816261)
+  — `main` at `8ba078b`, the first push:
+
+  | Job | Result |
+  | --- | --- |
+  | Formatting and lints | **failed** in 33 s — `cargo fmt` clean, then `error: redundant closure` at `tests/interop_v201.rs:1430:18`, `clippy::redundant_closure_for_method_calls` denied through `pedantic = "deny"` |
+  | Unit, integration and byte-mutation suites | passed in 54 s |
+  | Declared minimum supported Rust version | passed in 25 s |
+  | Wire compatibility with an unmodified v2.0.1 node | passed in 3 m 37 s — `test result: ok. 19 passed; 0 failed; 0 ignored; … finished in 69.43 s` |
+  | Linux artifacts, SHA-256 for every artifact | skipped, as designed: `if: github.event_name == 'workflow_dispatch' \|\| startsWith(github.ref, 'refs/tags/v')` |
+
+  The interop job's own steps built the node unmodified from `e3fc3dc` and ran the 19
+  ignored suites against it, so box 5's result now exists on a machine nobody in this
+  repository controls.
+
+  That lint error was unreachable from this repository's own host. Line 1430 sits inside
+  `fn descriptors()`, behind `#[cfg(target_os = "linux")]`: on Windows the block is not
+  compiled, so `cargo fmt`, `cargo test`, the MSRV check and nine clean runs of
+  `cargo clippy --all-targets -- -D warnings` all passed over a file that held a
+  Linux-only failure. It is the concrete argument for why this box stayed open rather than
+  being closed by hand — a gate that is a *copy* of CI's commands on a different platform is
+  not the same gate.
+
+  Fixed by [PR #1](https://github.com/jacek4yang/rust-reality-client/pull/1): the closure
+  replaced by `std::iter::Iterator::count`, nothing else, no behaviour change (`ReadDir` is
+  the iterator, and the function still returns `None` where `/proc` is absent). Both
+  directions were checked on Linux with the toolchain `ci.yml` pins (`clippy 0.1.98`,
+  `--locked --all-targets -- -D warnings`): restoring the old line into the Linux copy
+  reproduces RC=101 at the same `file:line`, and the fixed tree returns RC=0 — because a
+  one-second `Finished` line after a no-op cache hit is not evidence until the same command
+  has been seen to refuse the broken input.
+
+  The PR's run [`37101067616`](https://github.com/jacek4yang/rust-reality-client/actions/runs/37101067616)
+  is the first all-green execution of the four required jobs — lint 25 s, test 47 s
+  (`335 passed; 0 failed; 19 ignored` across eight targets), msrv 26 s, interop 3 m 22 s
+  (`19 passed; 0 failed; … 69.43 s`).
+
+  It merged as `aeac97d`, and the run for the merge itself
+  [`37101369573`](https://github.com/jacek4yang/rust-reality-client/actions/runs/37101369573)
+  repeats it on `main` — lint 29 s, test 42 s, msrv 27 s, interop 2 m 43 s
+  (`19 passed; 0 failed; … finished in 68.79 s`, with `RRC_SOAK_SECONDS=30` from the
+  workflow's own step).
 
 ## Delivery
 
@@ -438,9 +475,12 @@ The three hosts the commands were run on:
 
 ## What this file does not establish
 
-* That the workflow has ever been run by GitHub. It has not; there is no remote. Boxes 30
-  and 32 mark that line precisely, and it is the only line between this repository and a
-  tag someone can install.
+* That the `artifacts` and `checksums` jobs have ever been executed by GitHub. They are
+  gated to a tag or a manual dispatch (`if: github.event_name == 'workflow_dispatch' ||
+  startsWith(github.ref, 'refs/tags/v')`), and there is no tag yet, so both runs quoted in
+  box 30 skipped them. Boxes 32 and 33 stand in for them by running the same commands, and
+  they are still short of two matrix rows — `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-gnu` need linkers this VM does not have and no runner has built.
 * That a real-world dual-stack outage or a real NAT box was involved. Box 20 is a modelled
   route table; box 12 and box 21 use the client's own keepalive timer against a live node,
   which is the closest thing to a NAT that a fixture can be.
