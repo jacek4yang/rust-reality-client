@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time;
 
 use crate::config::{Config, Listen};
@@ -56,6 +56,12 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// work; this bounds the *waiting*, which a local process can inflate by opening
 /// sockets and then never sending a greeting. A parked task costs its own stack and
 /// a descriptor, and the parked ones are not yet the admitted ones.
+///
+/// "At once" is the whole meaning of the limit: it counts the connections being
+/// tracked now, so a process that has served a hundred thousand short requests over
+/// three days is no closer to refusing one than a process that has served ten. Both
+/// listeners share the one counter, because the resource being bounded — this
+/// process's tasks and descriptors — is not per listener either.
 pub const MAX_PENDING_LOCAL: usize = 1024;
 
 /// The first pause after a failed `accept`, doubled up to [`ACCEPT_BACKOFF_MAX`].
@@ -86,9 +92,38 @@ struct Stats {
     refused: AtomicU64,
     failed: AtomicU64,
     unresolved: AtomicU64,
+    /// Connection tasks this process is tracking *right now*: admitted, not yet
+    /// finished. This is what [`MAX_PENDING_LOCAL`] bounds, and it is deliberately
+    /// not `JoinSet::len()`, which also counts tasks that finished a while ago and
+    /// have not been reaped.
+    active: AtomicU64,
+    /// Reaped tasks that ended in a panic. A process-wide fact about this code
+    /// rather than about the network.
+    panicked: AtomicU64,
+    /// Reaped tasks that were aborted because the shutdown grace ran out. Counted
+    /// apart from panics because the operator's answer to the two is different:
+    /// one is a bug, the other is a connection that outlived its welcome.
+    cancelled: AtomicU64,
 }
 
 impl Stats {
+    /// Takes the hold one tracked connection has on [`MAX_PENDING_LOCAL`].
+    ///
+    /// The returned guard releases it in `drop`, which is the only reason a task
+    /// that panics or is cancelled returns its capacity: a guard cannot be
+    /// forgotten on a path the compiler does not check.
+    fn track(self: &Arc<Self>) -> Tracked {
+        self.active.fetch_add(1, Ordering::Relaxed);
+        Tracked {
+            stats: Arc::clone(self),
+        }
+    }
+
+    /// How many connection tasks are tracked right now.
+    fn active(&self) -> usize {
+        usize::try_from(self.active.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+    }
+
     fn report(&self) -> Report {
         Report {
             accepted: self.accepted.load(Ordering::Relaxed),
@@ -96,7 +131,23 @@ impl Stats {
             refused: self.refused.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             unresolved: self.unresolved.load(Ordering::Relaxed),
+            active: self.active(),
+            panicked: self.panicked.load(Ordering::Relaxed),
+            cancelled: self.cancelled.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// One tracked connection's hold on the pending-table capacity.
+struct Tracked {
+    stats: Arc<Stats>,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        // One add per guard, one sub per guard, and the guard is owned by the task,
+        // so the gauge cannot drift without a `Debug` report showing it.
+        self.stats.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -111,19 +162,30 @@ fn bump(counter: &AtomicU64) {
 /// What happened to the local connections of one run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Report {
-    /// Sockets accepted and handed a task.
+    /// Every socket this loop took from the kernel, whether or not it then got a task.
     pub accepted: u64,
     /// Exchanges that confirmed a tunnel and then finished both directions.
     pub carried: u64,
-    /// Exchanges the edge answered itself: a bad request, a refusal, a hang-up.
+    /// Exchanges this edge settled by itself: a bad request, a refusal, a hang-up,
+    /// and a socket it had no table slot for. Nothing in this count was ever asked
+    /// about a node.
     pub refused: u64,
     /// Exchanges where a node was asked, or a tunnel was up, and something failed.
     pub failed: u64,
     /// Connections whose task never reported: cancelled during the shutdown grace,
     /// or panicked. A number above zero is a fact about this process rather than
     /// about the network, and it is the one entry in a report that should never
-    /// grow.
+    /// grow. It is the sum of [`Self::panicked`] and [`Self::cancelled`], kept
+    /// because it is the one an operator should watch.
     pub unresolved: u64,
+    /// Connections tracked right now. Zero on a process that has drained, and a
+    /// number that climbs with the count of connections *ever* handled rather than
+    /// with the count handled at once is the leak this measures.
+    pub active: usize,
+    /// Tracked tasks that ended in a panic.
+    pub panicked: u64,
+    /// Tracked tasks the shutdown grace aborted.
+    pub cancelled: u64,
 }
 
 /// Which edge a listener speaks.
@@ -301,6 +363,11 @@ impl Service {
         let mut backoff = ACCEPT_BACKOFF;
         let mut consecutive = 0;
         loop {
+            // Reaping is part of ordinary operation, not of shutdown. A completed
+            // task stops being a cost the moment it completes, and the only way that
+            // happens is if somebody calls `join_next` — so this loop calls it on
+            // every turn it already had a reason to wake for.
+            self.reap_ready(&mut connections);
             let accepted = tokio::select! {
                 biased;
                 // `accept` is cancellation-safe, and `biased` polls the stop
@@ -311,6 +378,15 @@ impl Service {
                 changed = stopping.changed() => {
                     if changed.is_err() || *stopping.borrow_and_update() {
                         break;
+                    }
+                    continue;
+                }
+                // Guarded on the set being non-empty: `join_next` on an empty set is
+                // ready at once with `None`, and an always-ready branch in a biased
+                // `select` is a busy loop that never reaches the listener below it.
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(joined) = joined {
+                        self.reaped(joined);
                     }
                     continue;
                 }
@@ -336,7 +412,24 @@ impl Service {
                         level,
                         backoff,
                     );
-                    time::sleep(backoff).await;
+                    // The pause is a wait, not a blind spot: a stop request during it
+                    // is honoured at once, and finished tasks keep being reaped, so an
+                    // `accept` failure storm cannot quietly turn the capacity table into
+                    // a record of everything that ever connected.
+                    tokio::select! {
+                        biased;
+                        changed = stopping.changed() => {
+                            if changed.is_err() || *stopping.borrow_and_update() {
+                                break;
+                            }
+                        }
+                        joined = connections.join_next(), if !connections.is_empty() => {
+                            if let Some(joined) = joined {
+                                self.reaped(joined);
+                            }
+                        }
+                        () = time::sleep(backoff) => {}
+                    }
                 }
             }
         }
@@ -353,13 +446,48 @@ impl Service {
         }
     }
 
+    /// Reaps every task that has already finished, waiting for none of them.
+    ///
+    /// `try_join_next` is the point: it takes what is ready without polling the set,
+    /// so it registers no waker and cannot steal a wakeup from the `join_next` the
+    /// accept loop awaits. A loop that only reaped through `join_next` would be one
+    /// quiet period away from counting finished connections as capacity.
+    fn reap_ready(&self, connections: &mut JoinSet<()>) {
+        while let Some(joined) = connections.try_join_next() {
+            self.reaped(joined);
+        }
+    }
+
+    /// Charges one reaped task to exactly one terminal counter.
+    ///
+    /// A task that returned normally has already recorded its own outcome — that is
+    /// its last act — so the only thing left to say here is that it never got to
+    /// say anything. Panics and aborts are counted apart, and both are counted as
+    /// unresolved, because an aborted task and a panicked one leave the operator the
+    /// same question: which connection vanished without a line about it.
+    fn reaped(&self, joined: Result<(), JoinError>) {
+        match joined {
+            Ok(()) => {}
+            Err(error) if error.is_panic() => {
+                bump(&self.stats.panicked);
+                bump(&self.stats.unresolved);
+                self.logger
+                    .event_at(Level::Error, "taskLost")
+                    .text("reason", "a connection task panicked")
+                    .emit();
+            }
+            Err(_) => {
+                bump(&self.stats.cancelled);
+                bump(&self.stats.unresolved);
+            }
+        }
+    }
+
     /// Reaps finished connection tasks until the set is empty, counting the ones
     /// that ended without recording an outcome.
     async fn drain(&self, connections: &mut JoinSet<()>) {
         while let Some(joined) = connections.join_next().await {
-            if joined.is_err() {
-                bump(&self.stats.unresolved);
-            }
+            self.reaped(joined);
         }
     }
 
@@ -383,7 +511,13 @@ impl Service {
             .emit();
     }
 
-    /// Hands one accepted socket to a task, or closes it on the spot.
+    /// Hands one accepted socket to a task, or turns it away on the spot.
+    ///
+    /// The capacity that is checked is the tasks this process is *tracking now*, and a
+    /// socket turned away here never becomes a task at all: it is charged to
+    /// [`Report::refused`] and to no other counter, which keeps the terminal counters a
+    /// partition of what arrived and means nothing has to be un-counted if the spawn
+    /// below goes wrong.
     fn admit(
         &self,
         connections: &mut JoinSet<()>,
@@ -391,7 +525,13 @@ impl Service {
         mut stream: TcpStream,
         peer: SocketAddr,
     ) {
-        if connections.len() >= MAX_PENDING_LOCAL {
+        self.reap_ready(connections);
+        // Counted before the capacity decision, because the invariant an operator
+        // reads the report by is `accepted == carried + refused + failed +
+        // unresolved`. A socket that arrived and was turned away for being out of
+        // table is a refusal, not a disappearance: it arrived, and this edge said no.
+        bump(&self.stats.accepted);
+        if self.stats.active() >= MAX_PENDING_LOCAL {
             bump(&self.stats.refused);
             self.logger
                 .event_at(Level::Warn, "refused")
@@ -403,7 +543,6 @@ impl Service {
         // A proxy that adds a Nagle round trip to every small request looks like a
         // broken network, and the relay's cost is per-chunk copies either way.
         let _ = stream.set_nodelay(true);
-        bump(&self.stats.accepted);
         self.logger
             .event_at(Level::Debug, "accepted")
             .text("inbound", kind.label())
@@ -411,7 +550,11 @@ impl Service {
             .emit();
         let service = self.clone();
         let bound = local_end(&stream);
+        // Taken here rather than inside the task, so a spawn that the runtime refuses
+        // is charged to nothing: the guard is dropped by this frame on that path.
+        let tracked = self.stats.track();
         connections.spawn(async move {
+            let _tracked = tracked;
             let started = Instant::now();
             let outcome = match kind {
                 Kind::Socks5 => Finished::from(service.socks5.handle(&mut stream, bound).await),
@@ -875,6 +1018,9 @@ shortId = "01"
                 refused: 1,
                 failed: 1,
                 unresolved: 0,
+                active: 0,
+                panicked: 0,
+                cancelled: 0,
             }
         );
         let written = lines.taken();
@@ -1007,6 +1153,112 @@ shortId = "01"
         assert!(gate.handshakes_available() < gate.connections_available());
     }
 
+    /// One socket, already hung up by its other end.
+    ///
+    /// A client that connects and hangs up is the shape whose whole point is that the
+    /// handler reads EOF instead of a greeting: the task reaches a terminal counter
+    /// without waiting out a first-byte budget and without dialing a node.
+    async fn hung_up_socket() -> (TcpStream, SocketAddr) {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("an ephemeral loopback port");
+        let address = listener
+            .local_addr()
+            .expect("a bound listener knows its address");
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("a loopback connection to a socket that is listening");
+        let (accepted, peer) = listener
+            .accept()
+            .await
+            .expect("the connection this test just made");
+        drop(listener);
+        drop(accepted);
+        (stream, peer)
+    }
+
+    /// The tracked ceiling limits the tasks that are *alive*, not the connections
+    /// this process has ever handled, and it opens again by itself when one finishes.
+    ///
+    /// Filling the table with held guards is what the accept loop does under a local
+    /// process that opens sockets and does not speak on them. Two things have to be
+    /// true about the answer: it is a refusal that names the table rather than a hang
+    /// or a disappearance, and one finished task is enough to serve the next socket —
+    /// which is the half that a lifetime quota would fail, and the half that made the
+    /// original loop stop serving after its thousandth connection.
+    #[tokio::test]
+    async fn a_full_tracked_table_refuses_and_opens_again_without_raising_the_limit() {
+        let config =
+            parse(&one_node(free_port().await)).expect("one node on a port nobody listens on");
+        let (logger, lines) = capture();
+        let service = Service::new(&config, logger);
+        let mut connections = JoinSet::new();
+
+        let held: Vec<Tracked> = (0..MAX_PENDING_LOCAL)
+            .map(|_| service.stats.track())
+            .collect();
+        assert_eq!(service.stats.active(), MAX_PENDING_LOCAL);
+
+        let (arrived, peer) = hung_up_socket().await;
+        service.admit(&mut connections, Kind::Socks5, arrived, peer);
+        assert!(
+            connections.is_empty(),
+            "a socket turned away for being out of table never became a task"
+        );
+        assert_eq!(
+            service.stats.report(),
+            Report {
+                accepted: 1,
+                carried: 0,
+                refused: 1,
+                failed: 0,
+                unresolved: 0,
+                active: MAX_PENDING_LOCAL,
+                panicked: 0,
+                cancelled: 0,
+            },
+            "it arrived, and this edge said no"
+        );
+        assert!(
+            lines
+                .taken()
+                .iter()
+                .any(|line| line.contains("the pending local table is full")),
+            "the refusal has to say which limit it was, or an operator cannot tell \
+             overload from a broken client"
+        );
+
+        drop(held);
+        assert_eq!(
+            service.stats.active(),
+            0,
+            "a task that finished is not capacity"
+        );
+
+        let (arrived, peer) = hung_up_socket().await;
+        service.admit(&mut connections, Kind::Socks5, arrived, peer);
+        assert_eq!(
+            connections.len(),
+            1,
+            "one free slot is enough to serve one socket"
+        );
+        service.drain(&mut connections).await;
+
+        let report = service.stats.report();
+        assert_eq!(report.accepted, 2, "both sockets arrived");
+        assert_eq!(
+            report.active, 0,
+            "and neither of them is being tracked any more"
+        );
+        assert_eq!(report.unresolved, 0, "nothing was lost");
+        assert_eq!(
+            report.accepted,
+            report.carried + report.refused + report.failed + report.unresolved,
+            "{report:?}: one turn-away and one hang-up are both refusals, and a \
+             ceiling that binds is still a limit"
+        );
+    }
+
     /// A server has to report the listener it actually holds, say one line about
     /// binding it, and then stop when asked without inventing any traffic.
     ///
@@ -1072,10 +1324,22 @@ shortId = "01"
                 refused: 0,
                 failed: 0,
                 unresolved: 0,
+                active: 0,
+                panicked: 0,
+                cancelled: 0,
             }
         );
         let text = format!("{:?}", Report::default());
-        for counter in ["accepted", "carried", "refused", "failed", "unresolved"] {
+        for counter in [
+            "accepted",
+            "carried",
+            "refused",
+            "failed",
+            "unresolved",
+            "active",
+            "panicked",
+            "cancelled",
+        ] {
             assert!(text.contains(counter), "{text}");
         }
     }
