@@ -411,6 +411,22 @@ The four hosts the commands were run on:
   (`19 passed; 0 failed; … finished in 68.79 s`, with `RRC_SOAK_SECONDS=30` from the
   workflow's own step).
 
+  The protection is not decorative, which is worth a line because it is the part an
+  operator cannot see from a green badge. Pushing the commit this document lives in straight
+  at `main` is declined by the server:
+
+  ```text
+  remote: error: GH006: Protected branch update failed for refs/heads/main.
+  remote:
+  remote: - Changes must be made through a pull request.
+  remote: - 4 of 4 required status checks are expected.
+  To https://github.com/jacek4yang/rust-reality-client.git
+   ! [remote rejected] HEAD -> main (protected branch hook declined)
+  ```
+
+  With `enforce_admins` on, that includes the owner: no commit reaches `main` except as a
+  pull request whose four gates went green first, `aeac97d` included.
+
 ## Delivery
 
 - [x] **31. The README is complete.** `grep -c "^## " README.md` → 18. The eighteen
