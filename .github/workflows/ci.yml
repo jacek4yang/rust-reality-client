@@ -77,6 +77,26 @@ jobs:
       - name: cargo check on ${{ env.MSRV }}
         run: cargo check --locked --all-targets
 
+  dependency-audit:
+    name: Current RustSec dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+          components: ""
+      - name: Install pinned official audit tool
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit the committed lockfile
+        run: cargo audit --file Cargo.lock --json > dependency-audit.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: dependency-audit
+          path: dependency-audit.json
+          if-no-files-found: warn
+
   interop:
     name: Wire compatibility with an unmodified v2.0.1 node
     runs-on: ubuntu-24.04
@@ -133,7 +153,7 @@ jobs:
   artifacts:
     name: Linux artifacts (${{ matrix.name }})
     runs-on: ubuntu-24.04
-    needs: [lint, test, msrv, interop]
+    needs: [lint, test, msrv, interop, windows, dependency-audit]
     # An artifact exists to be shipped, so it is built for a tag or on demand
     # rather than for every commit on main.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
@@ -189,7 +209,7 @@ jobs:
           staged="$RUNNER_TEMP/stage/$bundle"
           mkdir -p "$staged"
           cp "target/$TARGET/release/rust-reality-client" "$staged/"
-          cp README.md examples/client.toml "$staged/"
+          cp README.md LICENSE-MIT LICENSE-APACHE examples/client.toml "$staged/"
           printf '%s\n' "$version" > "$staged/VERSION"
           # Sorted, zeroned ownership and `gzip -n` keep the archive a function
           # of its inputs: two builds of one commit should hash the same, which
@@ -235,3 +255,22 @@ jobs:
           path: staged/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
+
+  windows:
+    name: Windows portable core regression
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline regressions (live pinned-server tests run on Linux)
+        run: cargo test --locked
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.MSRV }}
+          components: ""
+      - name: MSRV
+        run: cargo check --locked --all-targets

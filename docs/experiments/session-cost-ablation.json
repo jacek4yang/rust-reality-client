@@ -1,0 +1,650 @@
+[
+  {
+    "binary_sha256": "84890cbc6b1538f18acb87045f7bc5c32dd49547b6d0b8fad40adf9dcb8fe2df",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00046413000382017344
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00044915699982084334
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000441134994616732
+      },
+      {
+        "sequence": 3,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020597656999598257
+      },
+      {
+        "sequence": 4,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02073149799980456
+      },
+      {
+        "sequence": 5,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.06460178300039843
+      },
+      {
+        "sequence": 6,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020489342998189386
+      },
+      {
+        "sequence": 7,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020586179998645093
+      },
+      {
+        "sequence": 8,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020608422004443128
+      },
+      {
+        "sequence": 9,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.0205776269940543
+      },
+      {
+        "sequence": 10,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020639820999349467
+      },
+      {
+        "sequence": 11,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02054822199716
+      }
+    ],
+    "successes": 9,
+    "old_stream_survived": true,
+    "corruptions": 3,
+    "label": "current"
+  },
+  {
+    "binary_sha256": "93aa72504de0426d332b4a05e863d528e27d10dabe5a9268e9c670251e802562",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00038497100467793643
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003952059996663593
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00040763000288279727
+      },
+      {
+        "sequence": 3,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000261613997281529
+      },
+      {
+        "sequence": 4,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00037082899507367983
+      },
+      {
+        "sequence": 5,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000484891002997756
+      },
+      {
+        "sequence": 6,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004262529982952401
+      },
+      {
+        "sequence": 7,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00043330299376975745
+      },
+      {
+        "sequence": 8,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00032659299904480577
+      },
+      {
+        "sequence": 9,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003150850025122054
+      },
+      {
+        "sequence": 10,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004922820007777773
+      },
+      {
+        "sequence": 11,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00052707499708049
+      }
+    ],
+    "successes": 0,
+    "old_stream_survived": true,
+    "corruptions": 12,
+    "label": "ablated"
+  },
+  {
+    "binary_sha256": "93aa72504de0426d332b4a05e863d528e27d10dabe5a9268e9c670251e802562",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0007077359987306409
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00031461400067200884
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00039191099494928494
+      },
+      {
+        "sequence": 3,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003348150057718158
+      },
+      {
+        "sequence": 4,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004338430007919669
+      },
+      {
+        "sequence": 5,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0005159669963177294
+      },
+      {
+        "sequence": 6,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0005831680027768016
+      },
+      {
+        "sequence": 7,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00036646300577558577
+      },
+      {
+        "sequence": 8,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0002424850026727654
+      },
+      {
+        "sequence": 9,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000442032003775239
+      },
+      {
+        "sequence": 10,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0005562279984587803
+      },
+      {
+        "sequence": 11,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00033596599678276107
+      }
+    ],
+    "successes": 0,
+    "old_stream_survived": true,
+    "corruptions": 12,
+    "label": "ablated"
+  },
+  {
+    "binary_sha256": "84890cbc6b1538f18acb87045f7bc5c32dd49547b6d0b8fad40adf9dcb8fe2df",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0005839500008733012
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000576218000787776
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00042875600047409534
+      },
+      {
+        "sequence": 3,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020798501995159313
+      },
+      {
+        "sequence": 4,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02061390900053084
+      },
+      {
+        "sequence": 5,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.06198747999587795
+      },
+      {
+        "sequence": 6,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020629546997952275
+      },
+      {
+        "sequence": 7,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020485480003117118
+      },
+      {
+        "sequence": 8,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02063064800313441
+      },
+      {
+        "sequence": 9,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02054587100428762
+      },
+      {
+        "sequence": 10,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02054637200490106
+      },
+      {
+        "sequence": 11,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020594057998096105
+      }
+    ],
+    "successes": 9,
+    "old_stream_survived": true,
+    "corruptions": 3,
+    "label": "current"
+  },
+  {
+    "binary_sha256": "84890cbc6b1538f18acb87045f7bc5c32dd49547b6d0b8fad40adf9dcb8fe2df",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004094969990546815
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0005280559998936951
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00036417900264495984
+      },
+      {
+        "sequence": 3,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020632291001675185
+      },
+      {
+        "sequence": 4,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02059482400363777
+      },
+      {
+        "sequence": 5,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020666042000812013
+      },
+      {
+        "sequence": 6,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02057379300094908
+      },
+      {
+        "sequence": 7,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020571608998579904
+      },
+      {
+        "sequence": 8,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020656688000599388
+      },
+      {
+        "sequence": 9,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020575955997628625
+      },
+      {
+        "sequence": 10,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020576586997776758
+      },
+      {
+        "sequence": 11,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.061536711000371724
+      }
+    ],
+    "successes": 9,
+    "old_stream_survived": true,
+    "corruptions": 3,
+    "label": "current"
+  },
+  {
+    "binary_sha256": "93aa72504de0426d332b4a05e863d528e27d10dabe5a9268e9c670251e802562",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004899680061498657
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003956970031140372
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00045445500290952623
+      },
+      {
+        "sequence": 3,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00038413899892475456
+      },
+      {
+        "sequence": 4,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000296045996947214
+      },
+      {
+        "sequence": 5,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004247899996698834
+      },
+      {
+        "sequence": 6,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000272410994512029
+      },
+      {
+        "sequence": 7,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004734089961857535
+      },
+      {
+        "sequence": 8,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00043664799886755645
+      },
+      {
+        "sequence": 9,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00048092500219354406
+      },
+      {
+        "sequence": 10,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00044636299571720883
+      },
+      {
+        "sequence": 11,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004961769955116324
+      }
+    ],
+    "successes": 0,
+    "old_stream_survived": true,
+    "corruptions": 12,
+    "label": "ablated"
+  },
+  {
+    "binary_sha256": "93aa72504de0426d332b4a05e863d528e27d10dabe5a9268e9c670251e802562",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003641989969764836
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.000425835998612456
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003884149991790764
+      },
+      {
+        "sequence": 3,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00041580700053600594
+      },
+      {
+        "sequence": 4,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00033933099621208385
+      },
+      {
+        "sequence": 5,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0011586359978537075
+      },
+      {
+        "sequence": 6,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003397920008865185
+      },
+      {
+        "sequence": 7,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003036580019397661
+      },
+      {
+        "sequence": 8,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00026835400058189407
+      },
+      {
+        "sequence": 9,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004417260061018169
+      },
+      {
+        "sequence": 10,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00047741999878780916
+      },
+      {
+        "sequence": 11,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0004102380044059828
+      }
+    ],
+    "successes": 0,
+    "old_stream_survived": true,
+    "corruptions": 12,
+    "label": "ablated"
+  },
+  {
+    "binary_sha256": "84890cbc6b1538f18acb87045f7bc5c32dd49547b6d0b8fad40adf9dcb8fe2df",
+    "requests": [
+      {
+        "sequence": 0,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00040341799467569217
+      },
+      {
+        "sequence": 1,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.00025334200472570956
+      },
+      {
+        "sequence": 2,
+        "path": "fast-corrupted",
+        "delivered": false,
+        "elapsed_seconds": 0.0003559219985618256
+      },
+      {
+        "sequence": 3,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.061627055998542346
+      },
+      {
+        "sequence": 4,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02070058399840491
+      },
+      {
+        "sequence": 5,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.02057963200059021
+      },
+      {
+        "sequence": 6,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020707825002318714
+      },
+      {
+        "sequence": 7,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020735336998768616
+      },
+      {
+        "sequence": 8,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020614895001926925
+      },
+      {
+        "sequence": 9,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020710368997242767
+      },
+      {
+        "sequence": 10,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.0206155259947991
+      },
+      {
+        "sequence": 11,
+        "path": "slower-intact",
+        "delivered": true,
+        "elapsed_seconds": 0.020642807001422625
+      }
+    ],
+    "successes": 9,
+    "old_stream_survived": true,
+    "corruptions": 3,
+    "label": "current"
+  }
+]

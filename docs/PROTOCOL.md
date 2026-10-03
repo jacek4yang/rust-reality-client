@@ -317,8 +317,11 @@ otherwise                                        -> Continue
 
 A non-TLS stream never yields `Record` classification: `NestedRead::Unframed`
 produces a single `End` frame and then outer records whose plaintext is the stream
-verbatim (`src/server/vision.rs:1374-1390`). The client's uplink runs the identical
-detector over the bytes the local application sends.
+verbatim (`src/server/vision.rs:1374-1390`). This Rust client's uplink currently
+continues authenticated Vision framing; it does not run that nested-TLS detector
+or claim uplink Direct. A downlink Direct transition never implicitly disables
+uplink encryption/framing. Any future uplink optimization requires its own
+validated transition state machine and compatibility evidence.
 
 Invariants this repository pins by test and this client must preserve: every
 plaintext byte before a `Direct` frame is delivered in order, no byte is
@@ -459,3 +462,14 @@ bounds in this repository — `DNS_BUDGET` 5 s and `CONNECT_BUDGET` 10 s
 (`src/handoff.rs:78`) — because an unanswered setup question has no value in being
 asked longer, and a stuck handshake that is not released is a slot that nobody
 else can use.
+
+## Tiny initial raw responses on the pinned server
+
+`src/server/vision.rs:1936-1951` loops until `NESTED_TLS_HEADER_SIZE` (five bytes)
+or destination EOF before classifying the first downlink. A destination sending
+three bytes and waiting on an open socket can therefore deadlock an application
+request/response exchange. Controlled three-byte echo probes timed out through
+both the Rust client and stock Xray v26.9.9; the direct-origin control passed.
+The application fixture exposes `--raw-probe-bytes 3` for reproduction. This is
+an unchanged-server limitation, not evidence to silently pad/replay application
+bytes or claim that switching entry nodes fixes it.

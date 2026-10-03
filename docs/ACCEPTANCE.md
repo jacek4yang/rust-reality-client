@@ -1,7 +1,46 @@
 # Acceptance
 
+## Validated candidate (2026-10-03)
+
+Runtime source: `3d829f8` (later changes are documentation and CI only).
+Tested local executable SHA-256:
+`e0a9d931913f8b4f060a14e4ed37b8b28d63cadd0c544a11091db757fe515a2e`.
+See [the evidence index](experiments/README.md) for raw data and controls.
+This is a candidate for a controlled rollout, not a universal production certificate.
+
+- [x] 365 offline Linux tests; formatting, strict Clippy, Rust 1.85 MSRV.
+- [x] 22 pinned, unmodified v2.0.1 server interop tests; final-runtime CI verifies them.
+- [x] Windows offline tests, strict Clippy and MSRV; no Windows blackhole claim.
+- [x] Final 12 interleaved 120-second A/B runs; all application checks pass.
+- [x] Session-feedback, hedge and TCP user-timeout ablations; real Linux packet loss.
+- [x] Matched-policy Xray control reproduces the observed blackhole bound.
+- [x] LINE-to-LANDING, IPv6-only, hostname/IPv4 entry and pipelined real TLS checks.
+- [x] Downloaded GNU/musl candidate packages pass actual application/recovery smokes;
+      ARM64 is built and checksummed, not executed on ARM hardware.
+- [x] Final-runtime real mixed soak: **3600.381 seconds**, 7061 short connections,
+      four WSS streams, four SSE streams, repeated 65-second quiet intervals,
+      120 origin resets, 120 local cancellations and 240 explicit reconnections.
+      All payload checks pass; active tasks return to zero and all permits return.
+      The 120 injected terminal failures are observed, not hidden or replayed.
+- [x] Dated RustSec scan: 99 locked dependencies, zero known vulnerabilities and
+      no warnings, with no advisory exclusions. This is not a cryptographic audit.
+- [ ] Real WAN/NAT and actual AI-provider acceptance: no production traffic used.
+- [ ] 24/72-hour opt-in endurance: not executed.
+- [ ] Merge, release and production deployment: not performed.
+
+The first few bytes of an arbitrary raw TCP response can still stall in the
+unchanged server; both clients reproduced the three-byte negative control.
+The attempted partial-write cursor optimization was withdrawn after real-transfer
+controls; its favorable microbenchmark is not advertised as network improvement.
+Neither interactive timing series establishes a speed advantage over Xray.
+
+## Historical acceptance ledger
+
+Host-specific checkout paths and the former WSL private address are redacted
+below; measured results and the cited public source revisions are unchanged.
+
 Every box below is one line of the release checklist, the command that either fills it
-or fails to, and the output that command actually produced. Every box is now checked, and
+or fails to, and the output that command actually produced. Every historical box was checked at its recorded revision, and
 box 30 was the last to get there: it stayed open until a GitHub runner had executed the
 pipeline. Nothing here is a promise about a future run: a box is checked because a log file
 in `target/` or an Actions run holds the line quoted under it.
@@ -34,8 +73,8 @@ The four hosts the commands were run on:
 
 | Where | What | Toolchain |
 | --- | --- | --- |
-| Windows 10 x64 (`D:\Workspace\rust-reality-client`) | the repository, the local suite, one live interop run | rustc/cargo 1.98.1 MSVC |
-| WSL2 Ubuntu, kernel 6.18.33.1 (`/home/jacek/rrclient`) | a build copy of the same tree: Linux checks, the live interop run with the `/proc` measurements, the release artifact | rustc/cargo 1.98.0 and 1.98.1 GNU |
+| Windows 10 x64 (`<Windows checkout>`) | the repository, the local suite, one live interop run | rustc/cargo 1.98.1 MSVC |
+| WSL2 Ubuntu, kernel 6.18.33.1 (`<WSL checkout>`) | a build copy of the same tree: Linux checks, the live interop run with the `/proc` measurements, the release artifact | rustc/cargo 1.98.0 and 1.98.1 GNU |
 | The same WSL2 VM | the `v2.0.1` node, its TLS 1.3 cover, the echo, the four fault targets and the two Vision TLS origins: `127.0.0.1:14443`…`:14451`, cover on `:44443` | `rust-reality 2.0.1`, Python 3.14 |
 | GitHub-hosted `ubuntu-24.04` | the four gates of `ci.yml`, run for real; see box 30 | rustc/cargo 1.98.1 GNU, as pinned by `env.RUST` |
 
@@ -64,8 +103,8 @@ The four hosts the commands were run on:
 
   One hit: `use std::process::ExitCode` in `src/main.rs:25`. The client never spawns a
   process; it is one binary holding two listeners. The live runs below talk to a
-  `rust-reality` node, not to Xray, and no Xray binary is referenced by any script in
-  `scripts/`.
+  `rust-reality` node, not to Xray, and no Xray process is needed by the runtime. New comparison scripts invoke
+  stock Xray only as an experimental control.
 
 - [x] **3. No Go runtime.**
 
@@ -118,7 +157,7 @@ The four hosts the commands were run on:
   ```
 
   And the same suite from Windows against the same node over the WSL NAT address
-  (`RRC_INTEROP_ADDR=172.30.96.85:14443`, log in `target/interop-windows.log`):
+  (`RRC_INTEROP_ADDR=<WSL-address>:14443`, log in `target/interop-windows.log`):
 
   ```text
   test result: ok. 22 passed; 0 failed; 0 ignored; … finished in 224.61s

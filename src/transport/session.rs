@@ -364,10 +364,11 @@ where
         if self.peer_closed {
             return Poll::Ready(Ok(()));
         }
+        let before = buffer.filled().len();
         let outcome = Pin::new(&mut self.stream).poll_read(context, buffer);
         match outcome {
             Poll::Ready(Ok(())) => {
-                if buffer.filled().is_empty() {
+                if buffer.filled().len() == before {
                     self.peer_closed = true;
                 }
                 Poll::Ready(Ok(()))
@@ -545,6 +546,12 @@ where
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        // A full ReadBuf is not an EOF observation and must not consume wire
+        // state. In Direct mode a zero-capacity socket read can return zero
+        // despite queued data; interpreting that as FIN loses a live stream.
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         if let Some(error) = this.failure() {
             return Poll::Ready(Err(into_io_error(&error)));
         }
@@ -1232,6 +1239,57 @@ mod tests {
 
     /// A refusal is the node's own answer, so it is reported as a rejection rather
     /// than as a broken stream.
+    #[tokio::test]
+    async fn a_zero_capacity_direct_read_does_not_fabricate_peer_eof() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"transition", Command::Direct).await;
+        let mut first = [0; 10];
+        session.read_exact(&mut first).await.expect("transition");
+        assert_eq!(session.downlink(), Downlink::Direct);
+        node.send_raw(b"still alive").await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), session.read(&mut []))
+                .await
+                .expect("an empty Direct read must not wait for socket data")
+                .expect("empty read"),
+            0
+        );
+        assert!(!session.peer_closed(), "no capacity is not peer EOF");
+        let mut later = [0; 11];
+        session
+            .read_exact(&mut later)
+            .await
+            .expect("next real read");
+        assert_eq!(&later, b"still alive");
+    }
+
+    #[tokio::test]
+    async fn direct_eof_is_relative_to_a_prefilled_read_buffer() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"transition", Command::Direct).await;
+        session.read_exact(&mut [0; 10]).await.expect("transition");
+        node.stream.shutdown().await.expect("node FIN");
+        let mut bytes = [0; 16];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        buffer.put_slice(b"prefix");
+        std::future::poll_fn(|context| Pin::new(&mut session).poll_read(context, &mut buffer))
+            .await
+            .expect("orderly EOF");
+        assert_eq!(buffer.filled(), b"prefix");
+        assert!(session.peer_closed(), "EOF means no newly appended bytes");
+    }
+
+    #[tokio::test]
+    async fn a_zero_capacity_framed_read_is_immediate_without_consuming_wire() {
+        let (mut session, _node) = answered().await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), session.read(&mut []))
+            .await
+            .expect("an empty read must not wait for a TLS record")
+            .expect("empty read");
+        assert!(!session.peer_closed());
+        assert!(session.incoming.is_empty());
+    }
+
     #[tokio::test]
     async fn a_refusal_is_reported_as_a_rejection() {
         let mut harness = harness();

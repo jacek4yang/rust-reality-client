@@ -1,0 +1,201 @@
+name: Isolated packet experiments
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/experiments/**
+      - scripts/interop/upstream-server.sh
+      - .github/workflows/packet-experiments.yml
+permissions:
+  contents: read
+concurrency:
+  group: packet-experiments-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.98.1
+      - name: Build exact clients and pinned unmodified server
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 build --release --locked
+          python3 scripts/experiments/build_ablations.py --only no-client-keepalive
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          curl -fL --retry 2 https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-linux-64.zip -o "$RUNNER_TEMP/xray.zip"
+          echo "1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df  $RUNNER_TEMP/xray.zip" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/xray.zip" xray -d "$RUNNER_TEMP/xray"
+          chmod +x "$RUNNER_TEMP/xray/xray"
+          "$RUNNER_TEMP/xray/xray" version
+      - name: Real packet loss and keepalive ablation
+        run: |
+          set -euo pipefail
+          mkdir -p target/packet-results
+          for variant in current xray no-keepalive; do
+            impl=rust-current
+            case "$variant" in
+              current) binary="$PWD/target/release/rust-reality-client" ;;
+              xray) binary="$RUNNER_TEMP/xray/xray"; impl=xray ;;
+              no-keepalive) binary="$PWD/target/ablations/no-client-keepalive/target/release/rust-reality-client" ;;
+            esac
+            sha256sum "$binary" >> target/packet-results/binaries.sha256
+            for scenario in idle-transient write-transient idle-blackhole write-blackhole; do
+              sudo env INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+                bash scripts/experiments/packet_faults.sh "$binary" "$impl" \
+                "$PWD/target/packet-results/$variant-$scenario" "$scenario"
+            done
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = {p.parent.name: json.loads(p.read_text()) for p in Path('target/packet-results').glob('*/result.json')}
+          assert len(rows) == 12, rows.keys()
+          for name, result in rows.items():
+              if name.endswith('transient'):
+                  assert result['recovered'], (name, result)
+          Path('target/packet-results/summary.json').write_text(json.dumps(rows, indent=2)+'\n')
+          print(json.dumps(rows, indent=2))
+          PY
+      - name: Collect only non-secret experiment records
+        if: always()
+        run: |
+          mkdir -p evidence
+          find target/packet-results -name result.json -exec sh -c 'cp "$1" "evidence/$(basename "$(dirname "$1")").json"' sh {} \; 2>/dev/null || true
+          cp target/packet-results/summary.json target/packet-results/binaries.sha256 evidence/ 2>/dev/null || true
+          git rev-parse HEAD > evidence/source-commit.txt
+          uname -a > evidence/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: packet-experiment-evidence
+          path: evidence/
+          if-no-files-found: error
+  pending-data-bound:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.98.1
+      - name: Build experimental per-socket user-timeout control
+        run: |
+          set -euo pipefail
+          # Keep this control tied to the pre-policy source, changing one mechanism.
+          git fetch --no-tags origin 59cf467cf8ad5836129bc59adb478abfa00b701d
+          python3 scripts/experiments/build_ablations.py --revision 59cf467cf8ad5836129bc59adb478abfa00b701d --only with-user-timeout
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+      - name: Bound pending data without dropping temporary outages
+        run: |
+          set -euo pipefail
+          binary="$PWD/target/ablations/with-user-timeout/target/release/rust-reality-client"
+          mkdir -p target/timeout-results
+          for seconds in 5 20 40; do
+            for scenario in idle-transient write-transient; do
+              sudo env RESTORE_SECONDS="$seconds" INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+                bash scripts/experiments/packet_faults.sh "$binary" rust-current \
+                "$PWD/target/timeout-results/$seconds-$scenario" "$scenario"
+            done
+          done
+          for scenario in idle-blackhole write-blackhole; do
+            sudo env INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+              bash scripts/experiments/packet_faults.sh "$binary" rust-current \
+              "$PWD/target/timeout-results/$scenario" "$scenario"
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = {p.parent.name: json.loads(p.read_text()) for p in Path('target/timeout-results').glob('*/result.json')}
+          assert len(rows) == 8
+          for name, result in rows.items():
+              if name.endswith('transient'):
+                  assert result['recovered'], (name, result)
+              else:
+                  assert result['detected'] and not result['censored'], (name, result)
+                  assert 50 <= result['elapsed_seconds'] <= 85, (name, result)
+          Path('target/timeout-results/summary.json').write_text(json.dumps(rows, indent=2)+'\n')
+          print(json.dumps(rows, indent=2))
+          PY
+      - name: Collect sanitized observations and exact experimental patch
+        if: always()
+        run: |
+          mkdir -p evidence-timeout
+          find target/timeout-results -name result.json -exec sh -c 'cp "$1" "evidence-timeout/$(basename "$(dirname "$1")").json"' sh {} \; 2>/dev/null || true
+          cp target/timeout-results/summary.json target/ablations/manifest.json target/ablations/with-user-timeout.patch evidence-timeout/ 2>/dev/null || true
+          git rev-parse HEAD > evidence-timeout/source-commit.txt
+          uname -a > evidence-timeout/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pending-data-bound-evidence
+          path: evidence-timeout/
+          if-no-files-found: error
+  xray-aligned-timers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.98.1
+      - name: Build pinned server and verify official Xray
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          curl -fL --retry 2 https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-linux-64.zip -o "$RUNNER_TEMP/xray.zip"
+          echo "1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df  $RUNNER_TEMP/xray.zip" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/xray.zip" xray -d "$RUNNER_TEMP/xray"
+          chmod +x "$RUNNER_TEMP/xray/xray"
+      - name: Separate default-policy differences from implementation differences
+        run: |
+          set -euo pipefail
+          mkdir -p target/xray-aligned-results
+          for round in 1 2; do
+            for scenario in idle-transient write-transient idle-blackhole write-blackhole; do
+              sudo env XRAY_MATCHED_TIMERS=1 RESTORE_SECONDS=40 INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+                bash scripts/experiments/packet_faults.sh "$RUNNER_TEMP/xray/xray" xray \
+                "$PWD/target/xray-aligned-results/$round-$scenario" "$scenario"
+            done
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = {p.parent.name: json.loads(p.read_text()) for p in Path('target/xray-aligned-results').glob('*/result.json')}
+          assert len(rows) == 8
+          # Preserve every result before interpreting it. This experiment does
+          # not assume Xray is worse, better or equal once timers are aligned.
+          Path('target/xray-aligned-results/summary.json').write_text(json.dumps(rows, indent=2)+'\n')
+          print(json.dumps(rows, indent=2))
+          for name, result in rows.items():
+              if name.endswith('transient'):
+                  assert result['recovered'], (name, result)
+          PY
+      - name: Collect non-secret aligned-policy results
+        if: always()
+        run: |
+          mkdir -p evidence-xray-aligned
+          find target/xray-aligned-results -name result.json -exec sh -c 'cp "$1" "evidence-xray-aligned/$(basename "$(dirname "$1")").json"' sh {} \; 2>/dev/null || true
+          cp target/xray-aligned-results/summary.json evidence-xray-aligned/ 2>/dev/null || true
+          git rev-parse HEAD > evidence-xray-aligned/source-commit.txt
+          uname -a > evidence-xray-aligned/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: xray-aligned-policy-evidence
+          path: evidence-xray-aligned/
+          if-no-files-found: error

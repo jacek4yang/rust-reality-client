@@ -171,8 +171,8 @@ more stable connection — they get a different failure. The names and values, a
 If one of these genuinely needs to change for your network, change it in the source and
 rebuild; the value you wrote in a file would have told you nothing about what it cost.
 
-Two absences are also deliberate and are argued with measurements rather than in the
-abstract: no socket in this client sets `TCP_USER_TIMEOUT`, and there is no read-idle
+Linux/Android sockets request a 60 s `TCP_USER_TIMEOUT`, supported by the
+controlled pending-data experiments below. There is no userspace read-idle
 deadline for an authenticated session. See
 [Long-lived connections and socket policy](#long-lived-connections-and-socket-policy).
 
@@ -313,13 +313,13 @@ stream back that arrives a few kilobytes at a time. Two of those three states lo
 exactly like a dead connection to anything that measures silence, so the
 mechanisms that answer "is this still working" are kept apart deliberately.
 
-### Four mechanisms, and only one of them is this client's
+### Four distinct mechanisms
 
 | | The question it answers | Where | The bound |
 | --- | --- | --- | --- |
 | **A** | Did *setup* take too long — resolution, the dial race, REALITY authentication, the VLESS request and response? | `DNS_BUDGET`, `CONNECT_BUDGET` (`src/transport/dial.rs:45`, `:53`), `FIRST_BYTE_BUDGET` (`src/handoff.rs:78`) | 5 s, 10 s, 15 s. Finite, on purpose: an unanswered setup question gains nothing from being asked longer. |
-| **B** | Is a socket still alive — the node's or the application's? | the kernel, armed by `configure` on both halves (`src/transport/socket.rs:90`) | 30 s of quiet, then 3 probes 10 s apart — about 60 s, and 59.1 s measured. Retransmission of unacknowledged data is the system's own `tcp_retries2` budget, which this client neither reads nor writes. |
-| **C** | Is a *write* stuck? | nothing: `carry` arms no timer (`src/transport/relay.rs`) | The buffer is fixed at 8 KiB per direction and the loop cannot pull the next chunk until the current one is accepted, so a stuck writer stops reading rather than queueing. The wait ends when the kernel's own retransmission budget ends — a tabled `tcp_retries2` of 15 is 13 to 30 minutes. |
+| **B** | Is a socket still alive — the node's or the application's? | the kernel, armed by `configure` on both halves (`src/transport/socket.rs:90`) | 30 s of quiet, then 3 probes 10 s apart — about 60 s, and 59.1 s measured. Linux/Android also request per-socket `TCP_USER_TIMEOUT=60000`; no global `tcp_retries2` setting is changed. |
+| **C** | Is a *write* stuck? | nothing: `carry` arms no timer (`src/transport/relay.rs`) | The buffer is fixed at 8 KiB per direction and the loop cannot pull the next chunk until the current one is accepted, so a stuck writer stops reading rather than queueing. On Linux/Android the per-socket pending-data timeout bounds this wait; observed application detection is about 61–79 s, not an exact deadline. Other platforms retain their kernel retransmission policy. |
 | **D** | Is the *request* going well? | the application | Outside this proxy. A provider's own request deadline, its WebSocket Ping/Pong policy and its SSE keep-alive comments are the application's business; this client carries those bytes and does not manufacture them. |
 
 What is *not* in the table is the point of the section: there is no per-direction
@@ -383,7 +383,7 @@ The six runs, on Linux 6.6 with the shipped 30/10/3 window armed on both sockets
 | `stalled-peer-backpressure` | 1 MiB to the same peer | the write **stalled 7980 ms**, then everything arrived; the client's own buffer never grew |
 | `outage-during-bulk` | 5 s outage *while* 1 MiB was in flight | the write cost 6515 ms and the transfer **completed** — retransmission, not keepalive, is what protected it |
 
-Read those four ways:
+**Historical keepalive-only interpretation (before the current user-timeout policy):**
 
 * **Idle-blackhole detection is ~60 s, and it is the armed window, not a userspace
   timer.** The 59.1 s is 30 + 3 × 10 minus scheduling, and no timer exists in the
@@ -406,33 +406,33 @@ Read those four ways:
   evidence: the writer parked, the queue grew in the kernel's socket buffers and
   not in user space, and the payload arrived unchanged.
 
-### `TCP_USER_TIMEOUT`: not armed, and not a read timeout
+### Pending-data bound after the packet-loss experiment
 
-Per `tcp(7)`, the option bounds "the maximum amount of time in milliseconds that
-transmitted data may remain unacknowledged, or buffered data may remain
-untransmitted (due to zero window size) before TCP will forcibly close the
-connection". The same page states three things that decide this:
+The earlier decision to leave `TCP_USER_TIMEOUT` unarmed was superseded by a
+real application-path failure: with 8 MiB queued and both directions blackholed,
+keepalive-only clients did not notify their local applications during 100 seconds.
+This was true for the pre-change client, its no-keepalive ablation and default
+Xray v26.9.9. The result is right-censored, not a measured eventual timeout.
 
-* "Increasing user timeouts allows a TCP connection to survive extended periods
-  without end-to-end connectivity" — i.e. a *long* value buys tolerance.
-* "when used with the `TCP keepalive` option, `TCP_USER_TIMEOUT` will override
-  keepalive to determine when to close a connection due to keepalive failure."
-* "The option has no effect on when TCP retransmits a packet, nor when a keepalive
-  probe is sent."
+Linux/Android data sockets now request a per-socket 60 s `TCP_USER_TIMEOUT`.
+The kernel value is read back in the socket regression tests. No global sysctl,
+firewall, route, congestion setting or server configuration is changed. Socket
+setup failure still refuses that connection instead of silently accepting an
+untuned socket. Unsupported platforms, including Windows, retain their previous
+keepalive policy and have no claimed equivalent pending-data bound.
 
-So it is *not* a generic application read-idle timeout, and the common claim that
-arming it necessarily kills healthy quiet streams is wrong: it can only fire when
-data is unacknowledged or untransmitted, and a quiet connection with an empty send
-queue has neither. It is also not free — on a socket with a pending write, a short
-`TCP_USER_TIMEOUT` replaces the ~60 s keepalive verdict above with a faster one,
-which is exactly the trade the `blackhole-park` and `outage-20s` runs measure.
-Lowering it to make a failure test finish sooner would buy a quicker red and a
-worse client.
+The isolated Linux control preserved 5, 20 and 40 second outages, with every
+8 MiB body byte-identical. Its permanent blackholes reached the application after
+60.99 s idle and 78.52 s writing. The latter is an important qualification: the
+configured timeout is checked by kernel retransmission/probe machinery, not a
+precise sixty-second application timer. See the raw cases and workflow links in
+[experiments](experiments/README.md). Longer outages may deliberately sacrifice
+a connection; application retries remain the application's responsibility.
 
-Decision: **unchanged and unarmed.** No socket in this project sets
-`TCP_USER_TIMEOUT`, no system default is modified, no congestion control is
-touched, and there is no configuration key for it. If it is ever armed it should be
-per socket, with the same six runs on both sides of the change.
+This does not impose a maximum session age or end-to-end response deadline.
+Healthy quiet sockets continue to be acknowledged by their peer's TCP stack.
+A responsive entry node with an unresponsive destination is a different failure
+shape, and no successful first-hop keepalive claims the application is healthy.
 
 ### What a keepalive answer is evidence *of*
 
@@ -569,3 +569,35 @@ export NO_PROXY=localhost,127.0.0.1
 
 `README.md` sections 6, 7 and 8 cover the same ground from the user's side, including when
 `socks5h://` versus local DNS matters.
+
+## Reproducing the additional application experiments
+
+Use an isolated checkout and fresh fixture credentials. The pinned server must
+be an unmodified build of commit `e3fc3dc36b931baec042074d6c88e928caf6941f`.
+
+```sh
+python3 -m venv target/soak-venv
+target/soak-venv/bin/pip install websockets==15.0.1
+INTEROP_BINARY=/absolute/path/to/rust-reality \
+  target/soak-venv/bin/python scripts/interop/application_soak.py \
+  --seconds 3600 --handoff --with-recovery --output target/acceptance
+```
+
+`--handoff` starts isolated LINE and LANDING processes. Both use the pinned
+binary. The client-side Direct/Outer observations establish its Vision boundary;
+LANDING's `downlink_direct` log field is not that client boundary. The harness
+also verifies real TLS ClientHello bytes pipelined in the same write as HTTP
+CONNECT or SOCKS greeting/CONNECT, fragmented WebSocket messages, endpoint
+Ping/Pong and Close, sequential/hash-checked SSE, quiet intervals and churn.
+
+At debug level the client emits a bounded resource snapshot every 30 seconds
+and on drain: tracked active/high-water counts and remaining connection,
+handshake, hedge and probe permits. `sessionFinished` records partial accepted
+byte counts even on errors; it never logs their contents. `/proc` samples belong
+to the actual client process. Thread count alone is not an async-task leak test.
+
+`--seconds 86400` and `--seconds 259200` select opt-in 24/72-hour runs and create
+longer-lived fixture certificates. Only an actually completed run is evidence.
+Keep the source and binary hashes together with the report; do not mix different
+Cargo worktrees under one target directory and assume the last executable was
+rebuilt. Never upload generated fixture keys or entire `target/` directories.
