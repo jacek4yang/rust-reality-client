@@ -64,7 +64,7 @@ pub mod quality;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -333,6 +333,7 @@ struct Shared<E> {
     names: Vec<String>,
     health: Vec<Health>,
     quality: Vec<quality::Quality>,
+    stopping: AtomicBool,
     logger: Mutex<Option<crate::logging::Logger>>,
     policy: Policy,
     primary: AtomicUsize,
@@ -358,6 +359,7 @@ impl<E: Node> Scheduler<E> {
                 names,
                 health: (0..count).map(|_| Health::new()).collect(),
                 quality: (0..count).map(|_| quality::Quality::default()).collect(),
+                stopping: AtomicBool::new(false),
                 logger: Mutex::new(None),
                 policy,
                 primary: AtomicUsize::new(0),
@@ -367,6 +369,20 @@ impl<E: Node> Scheduler<E> {
                 started: Instant::now(),
             }),
         }
+    }
+
+    /// Remaining bounded probe and hedge slots for diagnostics.
+    #[must_use]
+    pub fn available_budgets(&self) -> (usize, usize) {
+        (
+            self.shared.probes.available_permits(),
+            self.shared.spares.available_permits(),
+        )
+    }
+
+    /// Mark local service shutdown for terminal observations, without node penalties.
+    pub fn stopping(&self) {
+        self.shared.stopping.store(true, Ordering::Release);
     }
 
     /// Attach the service logger without exposing node credentials or destinations.
@@ -690,7 +706,17 @@ impl<E: Node> Scheduler<E> {
                             .duration("age", completion.age())
                             .count("toRemote", counts.to_remote)
                             .count("toLocal", counts.to_local)
-                            .text("cause", completion.cause.label())
+                            .text("downlink", completion.downlink)
+                            .text(
+                                "cause",
+                                if completion.cause == quality::Cause::Cancelled
+                                    && scheduler.shared.stopping.load(Ordering::Acquire)
+                                {
+                                    "localShutdown"
+                                } else {
+                                    completion.cause.label()
+                                },
+                            )
                             .text(
                                 "localOperation",
                                 completion.progress.local.failed.unwrap_or("none"),

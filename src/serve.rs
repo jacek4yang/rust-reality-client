@@ -97,6 +97,7 @@ struct Stats {
     /// not `JoinSet::len()`, which also counts tasks that finished a while ago and
     /// have not been reaped.
     active: AtomicU64,
+    high_water: AtomicU64,
     /// Reaped tasks that ended in a panic. A process-wide fact about this code
     /// rather than about the network.
     panicked: AtomicU64,
@@ -113,7 +114,8 @@ impl Stats {
     /// that panics or is cancelled returns its capacity: a guard cannot be
     /// forgotten on a path the compiler does not check.
     fn track(self: &Arc<Self>) -> Tracked {
-        self.active.fetch_add(1, Ordering::Relaxed);
+        let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+        self.high_water.fetch_max(active, Ordering::Relaxed);
         Tracked {
             stats: Arc::clone(self),
         }
@@ -329,6 +331,7 @@ impl Finished {
 /// process.
 #[derive(Clone)]
 struct Service {
+    scheduler: Scheduler<Handoff>,
     gate: Gate,
     socks5: socks5::Proxy<Scheduler<Handoff>>,
     http: http::Proxy<Scheduler<Handoff>>,
@@ -337,6 +340,35 @@ struct Service {
 }
 
 impl Service {
+    /// One bounded snapshot, never one event per packet or payload item.
+    fn observe(&self) {
+        let report = self.stats.report();
+        let (probes, spares) = self.scheduler.available_budgets();
+        self.logger
+            .event_at(Level::Debug, "resources")
+            .count("active", report.active as u64)
+            .count(
+                "trackedHighWater",
+                self.stats.high_water.load(Ordering::Relaxed),
+            )
+            .count(
+                "connectionsAvailable",
+                self.gate.connections_available() as u64,
+            )
+            .count(
+                "handshakesAvailable",
+                self.gate.handshakes_available() as u64,
+            )
+            .count("probesAvailable", probes as u64)
+            .count("sparesAvailable", spares as u64)
+            .count("accepted", report.accepted)
+            .count("carried", report.carried)
+            .count("failed", report.failed)
+            .count("panicked", report.panicked)
+            .count("cancelled", report.cancelled)
+            .emit();
+    }
+
     /// Builds one scheduler over one dial, and both edges over that scheduler.
     ///
     /// The dial is built from what this machine's routes say rather than from a
@@ -350,6 +382,7 @@ impl Service {
         let gate = Gate::default();
         Self {
             gate: gate.clone(),
+            scheduler: scheduler.clone(),
             socks5: socks5::Proxy::new(scheduler.clone(), gate.clone()),
             http: http::Proxy::new(scheduler, gate),
             logger,
@@ -724,6 +757,8 @@ impl Server {
             shutdown,
         } = self;
         let mut stopping = shutdown.subscribe();
+        let mut observation = tokio::time::interval(Duration::from_secs(30));
+        observation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut listeners = JoinSet::new();
         for inbound in inbounds {
             listeners.spawn(service.clone().accept(inbound, stopping.clone()));
@@ -737,13 +772,12 @@ impl Server {
             if *stopping.borrow_and_update() {
                 break;
             }
-            if stopping.changed().await.is_err() {
-                // Unreachable while `shutdown` below is alive, and the honest
-                // answer if that ever changes: a latch nobody can set is a server
-                // nobody can stop, so wind down instead of waiting.
-                break;
+            tokio::select! {
+                changed = stopping.changed() => { if changed.is_err() { break; } }
+                _ = observation.tick() => service.observe(),
             }
         }
+        service.scheduler.stopping();
         drop(shutdown);
         while let Some(joined) = listeners.join_next().await {
             if let Err(error) = joined {
@@ -754,6 +788,7 @@ impl Server {
                     .emit();
             }
         }
+        service.observe();
         service.stats.report()
     }
 }

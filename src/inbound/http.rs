@@ -535,11 +535,21 @@ impl<E: Establish> Proxy<E> {
                 }
                 match carry_observed(&mut reader, &mut session, &mut completion.progress).await {
                     Ok(transferred) => {
+                        completion.downlink = match session.downlink() {
+                            crate::transport::Downlink::Framed => "framed",
+                            crate::transport::Downlink::Outer => "outer",
+                            crate::transport::Downlink::Direct => "direct",
+                        };
                         completion.finish(None);
                         Outcome::Carried(transferred)
                     }
                     Err(error) => {
                         let error = verdict(session.failure(), error);
+                        completion.downlink = match session.downlink() {
+                            crate::transport::Downlink::Framed => "framed",
+                            crate::transport::Downlink::Outer => "outer",
+                            crate::transport::Downlink::Direct => "direct",
+                        };
                         completion.finish(Some(&error));
                         Outcome::Failed(error)
                     }

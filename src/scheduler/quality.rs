@@ -55,6 +55,8 @@ pub struct Completion {
     pub progress: Progress,
     /// Terminal attribution, never inferred from application payload.
     pub cause: Cause,
+    /// Last observed downlink state; unknown for an interrupted relay.
+    pub downlink: &'static str,
     started: Option<Instant>,
     sink: Option<Sink>,
 }
@@ -75,6 +77,7 @@ impl Completion {
                 },
             },
             cause: Cause::Cancelled,
+            downlink: "unknown",
             started: None,
             sink: None,
         }
@@ -238,5 +241,186 @@ impl Quality {
             .map(|entry| if entry.until > now { 500 } else { 0 })
             .min()
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::TransportError;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn verdict(cause: Cause) -> Completion {
+        let mut completion = Completion::untracked();
+        completion.begin();
+        completion.cause = cause;
+        completion
+    }
+
+    #[test]
+    fn local_resets_remote_resets_and_normal_eof_are_not_node_convictions() {
+        for (edge, error, want) in [
+            (
+                "local",
+                Error::Transport(TransportError::Local("reset".into())),
+                Cause::Local,
+            ),
+            (
+                "tunnel",
+                Error::Transport(TransportError::Socket("reset".into())),
+                Cause::Unknown,
+            ),
+            (
+                "tunnel",
+                Error::Session(SessionError::PeerAlert {
+                    level: 2,
+                    description: 80,
+                }),
+                Cause::Unknown,
+            ),
+        ] {
+            let mut c = verdict(Cause::Cancelled);
+            if edge == "local" {
+                c.progress.local.failed = Some("read");
+            } else {
+                c.progress.tunnel.failed = Some("read");
+            }
+            c.finish(Some(&error));
+            assert_eq!(c.cause, want);
+        }
+        let mut c = verdict(Cause::Cancelled);
+        c.finish(None);
+        assert_eq!(c.cause, Cause::Normal);
+    }
+
+    #[test]
+    fn protocol_attribution_requires_a_tunnel_read_not_a_local_encoder_failure() {
+        for operation in ["read", "write"] {
+            let mut c = verdict(Cause::Cancelled);
+            c.progress.tunnel.failed = Some(operation);
+            c.finish(Some(&Error::Session(SessionError::Framing("command"))));
+            assert_eq!(
+                c.cause,
+                if operation == "read" {
+                    Cause::TunnelProtocol
+                } else {
+                    Cause::Unknown
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_settles_once_and_unused_hedge_winner_settles_nothing() {
+        let count = Arc::new(AtomicUsize::new(0));
+        for begin in [false, true] {
+            let count = count.clone();
+            let mut c = Completion::new(Box::new(move |done| {
+                assert_eq!(done.cause, Cause::Cancelled);
+                count.fetch_add(1, Ordering::SeqCst);
+            }));
+            if begin {
+                c.begin();
+            }
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let count2 = count.clone();
+        let mut c = Completion::new(Box::new(move |_| {
+            count2.fetch_add(1, Ordering::SeqCst);
+        }));
+        c.begin();
+        c.finish(None);
+        c.finish(None);
+        drop(c);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn repeated_protocol_faults_cost_but_do_not_ban_and_expire() {
+        let quality = Quality::default();
+        for now in 1..=3 {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        assert_eq!(quality.penalty_ms(3), 500);
+        assert_eq!(quality.penalty_ms(30_003), 0);
+    }
+
+    #[test]
+    fn short_success_does_not_clear_a_fault_class_and_healthy_v6_is_not_penalized() {
+        let quality = Quality::default();
+        for now in 1..=3 {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        quality.record(AddressFamily::Ipv4, 4, 4, &verdict(Cause::Normal));
+        assert_eq!(quality.penalty_ms(4), 500);
+        quality.record(AddressFamily::Ipv6, 5, 5, &verdict(Cause::Normal));
+        assert_eq!(quality.penalty_ms(5), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_session_recovery_ignores_late_pre_recovery_faults() {
+        let quality = Quality::default();
+        for now in 1..=3 {
+            quality.record(
+                AddressFamily::Ipv4,
+                now,
+                now,
+                &verdict(Cause::TunnelProtocol),
+            );
+        }
+        let mut good = verdict(Cause::Normal);
+        good.progress.local.written = 100;
+        good.progress.tunnel.written = 100;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        quality.record(AddressFamily::Ipv4, 4, 31_004, &good);
+        for now in 31_005..31_010 {
+            quality.record(AddressFamily::Ipv4, 2, now, &verdict(Cause::TunnelProtocol));
+        }
+        assert_eq!(quality.penalty_ms(31_010), 0);
+    }
+
+    #[test]
+    fn shared_destination_failures_do_not_disable_every_entry() {
+        for _ in 0..3 {
+            let quality = Quality::default();
+            for now in 0..100 {
+                quality.record(AddressFamily::Ipv4, now, now, &verdict(Cause::Unknown));
+                quality.record(AddressFamily::Ipv4, now, now, &verdict(Cause::Local));
+                quality.record(AddressFamily::Ipv4, now, now, &verdict(Cause::Cancelled));
+            }
+            assert_eq!(quality.penalty_ms(100), 0);
+        }
+    }
+
+    #[test]
+    fn concurrent_completions_are_bounded_and_counted() {
+        let quality = Arc::new(Quality::default());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let quality = quality.clone();
+                scope.spawn(move || {
+                    for now in 0..1000 {
+                        quality.record(AddressFamily::Ipv4, now, now, &verdict(Cause::Unknown));
+                    }
+                });
+            }
+        });
+        let state = quality.state.lock().unwrap();
+        assert_eq!(state.completed, 8000);
+        assert_eq!(state.unknown, 8000);
+        assert_eq!(state.families.len(), 2);
     }
 }

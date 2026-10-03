@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BINARY="${INTEROP_BINARY:?set INTEROP_BINARY to a v2.0.1 server binary}"
-OUT_DIR="$REPO/target/interop"
+OUT_DIR="${INTEROP_OUTPUT_DIR:-$REPO/target/interop}"
 COVER_PORT="${INTEROP_COVER_PORT:-44443}"
 ENTRY_PORT="${INTEROP_ENTRY_PORT:-14443}"
 ECHO_PORT="${INTEROP_ECHO_PORT:-14444}"
@@ -33,6 +33,13 @@ COVER_OPT="${INTEROP_COVER_OPTIMIZATION:-false}"
 
 command -v python3 >/dev/null || { echo "python3 is required for the TLS 1.3 cover" >&2; exit 1; }
 mkdir -p "$OUT_DIR"
+
+cleanup() {
+  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" "${COVER_PID:-}" 2>/dev/null || true
+  rm -f "$OUT_DIR/handoff.env"
+}
+trap cleanup EXIT INT TERM
+
 
 # REALITY needs a cover that speaks TLS 1.3 over X25519. A loopback origin is
 # enough: v2.0.1 mirrors the pre-authentication prefix to it and reads its
@@ -129,7 +136,9 @@ sed -e "s/PRIVATE_KEY/$PRIVATE_KEY/" \
     -e "s/COVER_OPT/$COVER_OPT/" \
     "$OUT_DIR/server.json.in" > "$OUT_DIR/server.json"
 
-WSL_IP=$(hostname -I | awk '{print $1}')
+# Local CI needs no host-interface enumeration. WSL callers may opt in to a
+# reachable host address; a sandbox must not need hostname/ioctl permissions.
+WSL_IP="${INTEROP_HOST_ADDRESS:-127.0.0.1}"
 # Plain key=value rather than JSON: the client crate has no JSON reader, and
 # interop evidence should not depend on adding one.
 cat > "$OUT_DIR/handoff.env" <<HANDOFF
@@ -151,11 +160,6 @@ RRC_INTEROP_COVER_OPT=$COVER_OPT
 RRC_INTEROP_VERSION=$("$BINARY" --version | head -1 | tr -d '[:space:]')
 HANDOFF
 
-cleanup() {
-  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" "$COVER_PID" 2>/dev/null || true
-  rm -f "$OUT_DIR/handoff.env"
-}
-trap cleanup EXIT INT TERM
 
 echo "starting v2.0.1 entry on :$ENTRY_PORT with cover :$COVER_PORT and echo :$ECHO_PORT" >&2
 if [[ "${INTEROP_CHECK_ONLY:-0}" == "1" ]]; then

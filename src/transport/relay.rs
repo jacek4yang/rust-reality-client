@@ -250,6 +250,73 @@ mod tests {
     use super::*;
     use crate::error::{Failure, SessionError};
 
+    struct FailsAfter {
+        left: usize,
+    }
+
+    impl AsyncRead for FailsAfter {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+    impl AsyncWrite for FailsAfter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.left == 0 {
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+            }
+            let count = bytes.len().min(self.left);
+            self.left -= count;
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_preserves_partial_write_counts_and_edge() {
+        let (mut app, mut local) = tokio::io::duplex(64);
+        app.write_all(b"twelve bytes").await.unwrap();
+        let mut progress = Progress::default();
+        let error = carry_observed(&mut local, &mut FailsAfter { left: 7 }, &mut progress)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(progress.transferred().to_remote, 7);
+        assert_eq!(progress.tunnel.failed, Some("write"));
+        assert_eq!(progress.local.failed, None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_backpressure_preserves_counts_without_fabricating_failure() {
+        let (mut app, mut local) = tokio::io::duplex(64);
+        let (mut remote, _unread_peer) = tokio::io::duplex(4);
+        app.write_all(b"twelve bytes").await.unwrap();
+        let mut progress = Progress::default();
+        assert!(
+            time::timeout(
+                Duration::from_millis(20),
+                carry_observed(&mut local, &mut remote, &mut progress)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(progress.transferred().to_remote, 4);
+        assert_eq!(progress.local.failed, None);
+        assert_eq!(progress.tunnel.failed, None);
+    }
+
     /// The four sockets of one proxied connection: an application and an origin
     /// at the two ends, and the halves the relay holds between them.
     ///
