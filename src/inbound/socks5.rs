@@ -46,7 +46,8 @@ use crate::error::{Error, Limit, RejectReason};
 use crate::handoff::{Established, FIRST_BYTE_BUDGET};
 use crate::inbound::{Establish, Gate};
 use crate::protocol::vless::Destination;
-use crate::transport::{Transferred, carry, verdict};
+use crate::transport::relay::carry_observed;
+use crate::transport::{Transferred, verdict};
 
 /// Protocol version this inbound speaks, and the byte every conforming client
 /// opens with (RFC 1928 `VER`).
@@ -448,7 +449,12 @@ impl<E: Establish> Proxy<E> {
 
         match established {
             Err(error) => self.fail(stream, bound, error).await,
-            Ok(Established { mut session, .. }) => {
+            Ok(Established {
+                mut session,
+                mut completion,
+                ..
+            }) => {
+                completion.begin();
                 // This reply is the last free choice in the exchange. From here the
                 // session belongs to one node and one socket, so a stalled or reset
                 // transfer is reported to the client as an ended connection rather
@@ -460,9 +466,16 @@ impl<E: Establish> Proxy<E> {
                     // be taken back.
                     return Outcome::refused(&refusal);
                 }
-                match carry(stream, &mut session).await {
-                    Ok(transferred) => Outcome::Carried(transferred),
-                    Err(error) => Outcome::Failed(verdict(session.failure(), error)),
+                match carry_observed(stream, &mut session, &mut completion.progress).await {
+                    Ok(transferred) => {
+                        completion.finish(None);
+                        Outcome::Carried(transferred)
+                    }
+                    Err(error) => {
+                        let error = verdict(session.failure(), error);
+                        completion.finish(Some(&error));
+                        Outcome::Failed(error)
+                    }
                 }
             }
         }

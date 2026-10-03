@@ -42,8 +42,10 @@
 //! time this module is running, the pair of sockets is the connection.
 
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional_with_sizes};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
 
 use crate::error::{Error, TransportError};
 
@@ -99,6 +101,116 @@ where
         to_remote,
         to_local,
     })
+}
+
+/// Progress retained even when a relay errors or its future is cancelled.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// Observations at the application's socket.
+    pub local: Edge,
+    /// Observations at the tunnel's socket.
+    pub tunnel: Edge,
+}
+
+/// Small, payload-free observations at one edge.
+#[derive(Debug, Default)]
+pub struct Edge {
+    /// Bytes accepted by this writer; not proof of remote delivery.
+    pub written: u64,
+    /// The first failing operation at this edge.
+    pub failed: Option<&'static str>,
+}
+
+impl Progress {
+    /// Counts bytes accepted by each writer, including before failure.
+    #[must_use]
+    pub const fn transferred(&self) -> Transferred {
+        Transferred {
+            to_remote: self.tunnel.written,
+            to_local: self.local.written,
+        }
+    }
+}
+
+struct Observed<'a, S> {
+    stream: &'a mut S,
+    edge: &'a mut Edge,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Observed<'_, S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("read");
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_write(cx, buf);
+        match &result {
+            Poll::Ready(Ok(count)) => {
+                this.edge.written = this.edge.written.saturating_add(*count as u64);
+            }
+            Poll::Ready(Err(_)) => {
+                this.edge.failed.get_or_insert("write");
+            }
+            Poll::Pending => {}
+        }
+        result
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_flush(cx);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("flush");
+        }
+        result
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_shutdown(cx);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("shutdown");
+        }
+        result
+    }
+}
+
+/// The same bounded Tokio relay, with error/cancellation-safe progress.
+///
+/// # Errors
+/// Returns the first relay error, without discarding the observations in `progress`.
+pub async fn carry_observed<L, R>(
+    local: &mut L,
+    remote: &mut R,
+    progress: &mut Progress,
+) -> Result<Transferred, io::Error>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut local = Observed {
+        stream: local,
+        edge: &mut progress.local,
+    };
+    let mut remote = Observed {
+        stream: remote,
+        edge: &mut progress.tunnel,
+    };
+    carry(&mut local, &mut remote).await
 }
 
 /// Decides what a failed relay means.

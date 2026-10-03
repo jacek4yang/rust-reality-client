@@ -346,6 +346,7 @@ impl Service {
         let mode = DialPolicy::default();
         let dial = Dial::new(Environment::detect(mode), Tuning::for_policy(mode));
         let scheduler = Scheduler::from_config(config, &dial);
+        scheduler.observe_with(logger.clone());
         let gate = Gate::default();
         Self {
             gate: gate.clone(),

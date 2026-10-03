@@ -60,11 +60,12 @@
 //! later is the failure the relay gives the application.
 
 pub mod health;
+pub mod quality;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -331,6 +332,8 @@ struct Shared<E> {
     nodes: Vec<E>,
     names: Vec<String>,
     health: Vec<Health>,
+    quality: Vec<quality::Quality>,
+    logger: Mutex<Option<crate::logging::Logger>>,
     policy: Policy,
     primary: AtomicUsize,
     switched_ms: AtomicU64,
@@ -354,6 +357,8 @@ impl<E: Node> Scheduler<E> {
                 nodes,
                 names,
                 health: (0..count).map(|_| Health::new()).collect(),
+                quality: (0..count).map(|_| quality::Quality::default()).collect(),
+                logger: Mutex::new(None),
                 policy,
                 primary: AtomicUsize::new(0),
                 switched_ms: AtomicU64::new(0),
@@ -362,6 +367,15 @@ impl<E: Node> Scheduler<E> {
                 started: Instant::now(),
             }),
         }
+    }
+
+    /// Attach the service logger without exposing node credentials or destinations.
+    pub fn observe_with(&self, logger: crate::logging::Logger) {
+        *self
+            .shared
+            .logger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(logger);
     }
 
     /// The timings this scheduler runs by, for `explain`.
@@ -547,6 +561,7 @@ impl<E: Node> Scheduler<E> {
                 || millis(self.shared.policy.hedge_initial),
                 |latency| millis(latency).max(1),
             )
+            .saturating_add(self.shared.quality[index].penalty_ms(now_ms))
     }
 
     /// Makes `index` the leader and starts the dwell clock on that decision.
@@ -642,7 +657,53 @@ impl<E: Node> Scheduler<E> {
                 .establish(destination, port)
                 .await;
             scheduler.record(index, &result);
-            result
+            result.map(|mut established| {
+                let family = established.family;
+                let setup = established.total_latency;
+                let opened = scheduler.elapsed_ms();
+                established.completion = quality::Completion::new(Box::new(move |completion| {
+                    scheduler.shared.quality[index].record(
+                        family,
+                        opened,
+                        scheduler.elapsed_ms(),
+                        completion,
+                    );
+                    let logger = scheduler
+                        .shared
+                        .logger
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let Some(logger) = logger {
+                        let counts = completion.progress.transferred();
+                        logger
+                            .event_at(crate::logging::Level::Debug, "sessionFinished")
+                            .count("nodeIndex", index as u64)
+                            .text(
+                                "family",
+                                match family {
+                                    crate::transport::AddressFamily::Ipv4 => "ipv4",
+                                    crate::transport::AddressFamily::Ipv6 => "ipv6",
+                                },
+                            )
+                            .duration("setup", setup)
+                            .duration("age", completion.age())
+                            .count("toRemote", counts.to_remote)
+                            .count("toLocal", counts.to_local)
+                            .text("cause", completion.cause.label())
+                            .text(
+                                "localOperation",
+                                completion.progress.local.failed.unwrap_or("none"),
+                            )
+                            .text(
+                                "tunnelOperation",
+                                completion.progress.tunnel.failed.unwrap_or("none"),
+                            )
+                            .emit();
+                    }
+                }));
+                established
+            })
         })
     }
 

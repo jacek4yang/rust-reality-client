@@ -249,6 +249,7 @@ impl Node for Fake {
 fn tunnel(cost: Duration) -> Established<DuplexStream> {
     let (session, _peer) = tokio::io::duplex(64);
     Established {
+        completion: super::quality::Completion::untracked(),
         session,
         address: "127.0.0.1:44443"
             .parse()
