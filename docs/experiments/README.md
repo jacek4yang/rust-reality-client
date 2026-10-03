@@ -205,7 +205,8 @@ framed read can wait for network bytes unnecessarily. A third regression covers
 EOF appended to a prefilled ReadBuf. These are API-boundary regressions, not
 proof that they caused a particular production AI interruption.
 
-The corrected transport retains an accepted-prefix cursor across partial writes.
+The experimental transport retained an accepted-prefix cursor across partial writes.
+That optimization was subsequently withdrawn, as documented below.
 It does not repeatedly compact the unsent tail; buffer size, authentication,
 ordering and backpressure remain unchanged. A partial/Pending/append/drain test
 verifies no replay or omission even if shutdown appends behind a partial record.
@@ -225,13 +226,13 @@ is claimed here.
 
 ### Cursor optimization not adopted
 
-`bulk-profile-confirm.json.gz` records128 real TLS transfer trials (four arms,
-four repetitions, twoTLS versions, upload/download, one/four connections).
+`bulk-profile-confirm.json.gz` records 128 real TLS transfer trials (four arms,
+four repetitions, two TLS versions, upload/download, one/four connections).
 `bulk-profile-aa.json.gz` uses the identical f12942e executable under both Rust
-labels: median throughput ratios still span0.913–1.131, exposing measurement
+labels: median throughput ratios still span 0.913–1.131, exposing measurement
 noise. `bulk-profile-cursor-ablation.json.gz` repeats128 trials with the ReadBuf
 fix in both Rust arms and the cursor only in the candidate. Upload median ratios
-are0.865–0.938 while download ratios vary. All payload checks pass, but these
+are 0.865–0.938 while download ratios vary. All payload checks pass, but these
 results do not justify adopting the cursor. The recommended runtime retains the
 ReadBuf correctness fix and reverts the cursor; the patch is preserved as
 `partial-write-cursor-experimental.patch`. No negative observation is discarded.
@@ -240,3 +241,44 @@ The isolated microbenchmark remains valid within its stated scope, but it does
 not establish useful end-to-end speedup. `bulk-profile-before.json.gz` is labeled
 exploratory (a short compile overlapped initial startup). The later trials freeze
 binaries and harness, with their exact background workload recorded in each file.
+
+
+## Recommended ReadBuf-only candidate
+
+The runtime source at `3d829f8` retains the correctness fix, not the cursor. Its
+local executable hash is e0a9d931913f8b4f060a14e4ed37b8b28d63cadd0c544a11091db757fe515a2e.
+`comparison-readbuf-final.json.gz` preserves 12 frozen 120-second runs comparing this
+candidate to f12942e and official Xray. All pass. Median per-run P95/P99(ms):
+f12942e 1.710/3.389; ReadBuf-only 1.683/2.711; Xray 1.879/3.098. P99 ranges overlap:
+2.340–3.620,2.292–3.609,2.362–3.695 respectively. No speed superiority is claimed.
+Maximum sampled RSS (KiB) is 4788, 4784, 46684 for this narrow workload.
+
+`readbuf-artifact-runtime-smokes.json` verifies the actual downloaded GNU/musl
+packages from run 37153011410, including Handoff, application checks, explicit
+recovery and entry SIGKILL. ARM64 is built/checksummed, not run on an ARM host.
+
+`dependency-audit-441b97b.json` is the cargo-audit 0.22.2 report from
+[run37155020728](https://github.com/jacek4yang/rust-reality-client/actions/runs/37155020728):
+99 locked dependencies, zero known vulnerabilities and no warnings against
+RustSec database commit ef6173cbc5c50ec8166f9a5b28f07834144373ee (1290 advisories).
+The scan sets no ignored advisories. It is a dated known-advisory check, not an
+independent cryptographic audit or proof that no unknown vulnerabilities exist.
+
+
+## Completed final-candidate recovery hour
+
+`acceptance-readbuf-final-60m.json.gz` is the final ReadBuf-only runtime's actual
+**3600.381-second** LINE-to-LANDING mixed soak. It includes 7061 churn connections,
+four WSS streams (550 checked messages each), four SSE streams (17976 sequential
+checked events each), repeated 65-second quiet intervals, 120 origin resets,
+120 local cancellations and 240 explicit new application connections.
+After drain: active=0, all 256/32/4/16 permits returned, panicked=0, FD=11,
+peak sampled RSS=5276 KiB and client CPU time=12.51 s. The failed counter is120,
+matching the injected origin failures; these are not healthy-path regressions.
+
+The older f12942e recovery hour is separately preserved in
+`acceptance-final-recovery-60m.json.gz` (3600.340 seconds, 7052 churn connections).
+The healthy f12942e hour and pre-timeout hour are also separate. Different
+versions and overlapping runs must never be added into a claim of one continuous
+multi-hour run of the final candidate. The interrupted cursor-candidate soak is
+not a completed acceptance run.

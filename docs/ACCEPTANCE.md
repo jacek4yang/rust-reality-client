@@ -1,32 +1,38 @@
 # Acceptance
 
-## Current candidate (2026-10-03)
+## Validated candidate (2026-10-03)
 
-The historical checklist below is retained with its original revisions. It is
-not a claim that every new production-hardening gate has passed. The current
-runtime is `3068319`, with local executable SHA-256
-`f12942e3fad2a9938a14c3739748021a908236eab2e897a4d2c461145d20a5f6`.
-See [the evidence index](experiments/README.md) for raw data, controls and limits.
+Runtime source: `3d829f8` (later changes are documentation and CI only).
+Tested local executable SHA-256:
+`e0a9d931913f8b4f060a14e4ed37b8b28d63cadd0c544a11091db757fe515a2e`.
+See [the evidence index](experiments/README.md) for raw data and controls.
+This is a candidate for a controlled rollout, not a universal production certificate.
 
-- [x] 362 offline tests on Linux; formatting, strict Clippy and Rust 1.85 MSRV.
-- [x] Pinned unmodified v2.0.1 server interoperability in CI.
-- [x] Windows offline tests, strict Clippy and MSRV in CI; no Windows blackhole claim.
-- [x] 12 final-runtime, interleaved 120 s A/B runs; all application assertions pass.
-- [x] Final-runtime session-feedback and setup-hedge ablations repeat successfully.
-- [x] Actual Linux packet-loss, timeout-only ablation and aligned-policy Xray control.
-- [x] LINE→LANDING, IPv6-only, IPv4-only hostname and pipelined TLS application checks.
-- [x] GitHub-built GNU/musl candidate artifacts pass local real-application smoke.
-- [x] Final-runtime healthy mixed workload: 3600.163 s, 7056 churn connections,
-      four WSS and four SSE streams; no abnormal failures and all permits returned.
-- [ ] Final-runtime 60-minute mixed workload with injected resets/cancellation and
-      explicit application reconnection: running, not yet claimed.
-- [ ] Real WAN/NAT and actual AI-provider acceptance; no production traffic used.
-- [ ] 24/72-hour opt-in endurance; not executed.
+- [x] 365 offline Linux tests; formatting, strict Clippy, Rust 1.85 MSRV.
+- [x] 22 pinned, unmodified v2.0.1 server interop tests; final-runtime CI verifies them.
+- [x] Windows offline tests, strict Clippy and MSRV; no Windows blackhole claim.
+- [x] Final 12 interleaved 120-second A/B runs; all application checks pass.
+- [x] Session-feedback, hedge and TCP user-timeout ablations; real Linux packet loss.
+- [x] Matched-policy Xray control reproduces the observed blackhole bound.
+- [x] LINE-to-LANDING, IPv6-only, hostname/IPv4 entry and pipelined real TLS checks.
+- [x] Downloaded GNU/musl candidate packages pass actual application/recovery smokes;
+      ARM64 is built and checksummed, not executed on ARM hardware.
+- [x] Final-runtime real mixed soak: **3600.381 seconds**, 7061 short connections,
+      four WSS streams, four SSE streams, repeated 65-second quiet intervals,
+      120 origin resets, 120 local cancellations and 240 explicit reconnections.
+      All payload checks pass; active tasks return to zero and all permits return.
+      The 120 injected terminal failures are observed, not hidden or replayed.
+- [x] Dated RustSec scan: 99 locked dependencies, zero known vulnerabilities and
+      no warnings, with no advisory exclusions. This is not a cryptographic audit.
+- [ ] Real WAN/NAT and actual AI-provider acceptance: no production traffic used.
+- [ ] 24/72-hour opt-in endurance: not executed.
 - [ ] Merge, release and production deployment: not performed.
 
-The server's initial three-byte raw-response stall affects both clients and is
-explicitly retained as a negative finding. Aligned Xray socket settings reproduce
-the tested blackhole bound. Neither timing series demonstrates a speed advantage.
+The first few bytes of an arbitrary raw TCP response can still stall in the
+unchanged server; both clients reproduced the three-byte negative control.
+The attempted partial-write cursor optimization was withdrawn after real-transfer
+controls; its favorable microbenchmark is not advertised as network improvement.
+Neither interactive timing series establishes a speed advantage over Xray.
 
 ## Historical acceptance ledger
 
