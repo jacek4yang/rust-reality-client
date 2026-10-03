@@ -1,6 +1,6 @@
 # Production-hardening recovery record
 
-Updated 2026-10-03 19:51 UTC. Recovery branch: `checkpoint/production-hardening`,
+Updated 2026-10-03 20:05 UTC. Recovery branch: `checkpoint/production-hardening`,
 draft PR #6. Main and PR #5 remain unchanged. No merge, release or deployment.
 
 Runtime source is `306831977aecbd026c5a68e9e907d356622a3455`; later changes are
@@ -15,12 +15,13 @@ artifact application smokes; IPv6, Handoff, pipelining and origin reset; actual
 isolated entry SIGKILL reaches the application while the proxy remains alive.
 See `docs/experiments/README.md` and the raw files linked there.
 
-In progress: exact-runtime healthy LINE-LANDING hour (started 19:04 UTC) and
-mixed WSS/SSE/churn/quiet/reset/cancellation/reconnection hour (started 19:44 UTC).
-Do not mark either passed without its complete report and drained resources.
+Completed healthy LINE-LANDING hour: 3600.163 s, 7056 short connections and
+eight long streams; failed/panicked=0, active=0 and all permits returned.
+In progress: mixed WSS/SSE/churn/quiet/reset/cancellation/reconnection hour
+(started 19:44 UTC). Do not mark it passed without its complete report and drain.
 The earlier pre-timeout hour is separately labeled, not substituted for these.
 
-Next: await both reports, retain sanitized evidence, finish documentation and
+Next: await the recovery report, retain sanitized evidence, finish documentation and
 final exact-commit CI, publish a focused review branch/PR without force-pushing
 this recovery history. CI candidate artifact run: 37147589214. Packet controls:
 37148161890. No stable release is authorized or claimed.

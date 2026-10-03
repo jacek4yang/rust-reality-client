@@ -186,3 +186,12 @@ transport cancellation, and new application connections. It does not migrate or
 replay established sessions. `--terminate-node` adds a separate post-workload
 SIGKILL of only the isolated fixture entry process and checks that the application
 sees a terminal failure while the proxy remains alive.
+
+
+`acceptance-final-healthy-60m.json.gz` records the completed final-runtime
+LINE→LANDING healthy mix: 3600.163 s, 7056 short connections, four WSS streams
+with 550 checked messages each, and four SSE streams with 17975 checked events
+each. Quiet intervals are 65 s. After drain: active=0, all 256/32/4/16 permits
+returned, failed=0, panicked=0, FD=11, peak sampled RSS=4872 KiB and client CPU
+time=12.26 s. This run is a healthy/churn mix; the separate recovery-enabled
+hour must be assessed from its own report.

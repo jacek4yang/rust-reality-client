@@ -16,7 +16,8 @@ See [the evidence index](experiments/README.md) for raw data, controls and limit
 - [x] Actual Linux packet-loss, timeout-only ablation and aligned-policy Xray control.
 - [x] LINE→LANDING, IPv6-only, IPv4-only hostname and pipelined TLS application checks.
 - [x] GitHub-built GNU/musl candidate artifacts pass local real-application smoke.
-- [ ] Final-runtime 60-minute healthy mixed workload: running, not yet claimed.
+- [x] Final-runtime healthy mixed workload: 3600.163 s, 7056 churn connections,
+      four WSS and four SSE streams; no abnormal failures and all permits returned.
 - [ ] Final-runtime 60-minute mixed workload with injected resets/cancellation and
       explicit application reconnection: running, not yet claimed.
 - [ ] Real WAN/NAT and actual AI-provider acceptance; no production traffic used.
