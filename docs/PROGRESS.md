@@ -70,3 +70,13 @@ top of3068319. Previously built/pinned1.98.1 executable SHA-256:
 365 offline tests and Clippy had passed before the cursor experiment. A fresh
 recovery-enabled3600s Handoff soak started20:41 UTC. Final interactive A/B,
 pinned-server recheck, artifact build and exact final-commit CI remain due.
+
+
+21:17 UTC: final e0a9d93 interactive A/B completed12/12; ranges overlap, no
+speed-superiority claim. CI candidate artifacts3d829f8 from37153011410 pass
+actual GNU/musl Handoff/reset/entry-kill smokes; ARM64 is build-only. The f12942e
+recovery hour completed3600.340s with120resets/120cancellations/240reconnections;
+this is retained separately. The e0a9d93 hour remains running until21:41UTC.
+Local cargo-audit installation encountered an egress CONNECT403; no completed
+local scan. The repository's read-only CI now includes a pinned official RustSec
+scan; do not mark it passed until the actual job and report are verified.
