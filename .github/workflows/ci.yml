@@ -235,3 +235,22 @@ jobs:
           path: staged/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
+
+  windows:
+    name: Windows portable core regression
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline regressions (live pinned-server tests run on Linux)
+        run: cargo test --locked
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.MSRV }}
+          components: ""
+      - name: MSRV
+        run: cargo check --locked --all-targets

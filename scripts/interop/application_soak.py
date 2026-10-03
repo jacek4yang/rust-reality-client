@@ -64,6 +64,61 @@ def tunnel(proxy_port, origin_port, kind):
     return sock
 
 
+def pipelined_tls(proxy, target, kind, context):
+    """Send CONNECT plus the real TLS ClientHello in one write, then validate TLS.
+
+    OpenSSL's MemoryBIO is the TLS implementation; this is only socket plumbing.
+    No verification is disabled and no hand-written TLS records are involved.
+    """
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_side=False, server_hostname='localhost')
+    try: tls.do_handshake()
+    except ssl.SSLWantReadError: pass
+    hello = outgoing.read()
+    assert hello, 'OpenSSL produced no ClientHello'
+    with socket.create_connection(('127.0.0.1', proxy), 15) as sock:
+        if kind == 'http':
+            prefix = f'CONNECT 127.0.0.1:{target} HTTP/1.1\r\nHost: localhost\r\n\r\n'.encode()
+            sock.sendall(prefix + hello)
+            answer = bytearray()
+            while not answer.endswith(b'\r\n\r\n'):
+                answer.extend(recv_exact(sock, 1))
+                assert len(answer) <= 16384
+            assert answer.startswith(b'HTTP/1.1 200 ')
+        else:
+            prefix = b'\x05\x01\x00\x05\x01\x00\x01\x7f\x00\x00\x01' + struct.pack('!H', target)
+            sock.sendall(prefix + hello)
+            assert recv_exact(sock, 2) == b'\x05\x00'
+            answer = recv_exact(sock, 4)
+            assert answer[:2] == b'\x05\x00'
+            recv_exact(sock, (4 if answer[3] == 1 else 16) + 2)
+        def flush():
+            wire = outgoing.read()
+            if wire: sock.sendall(wire)
+        def read_wire():
+            wire = sock.recv(65536)
+            if not wire: raise EOFError('truncated nested TLS')
+            incoming.write(wire)
+        while True:
+            try:
+                tls.do_handshake(); flush(); break
+            except ssl.SSLWantReadError:
+                flush(); read_wire()
+        tls.write(b'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'); flush()
+        answer = bytearray()
+        while True:
+            try: answer.extend(tls.read(65536))
+            except ssl.SSLWantReadError:
+                flush(); read_wire(); continue
+            if b'\r\n\r\n' not in answer: continue
+            head, body = bytes(answer).split(b'\r\n\r\n', 1)
+            length = int(next(line.split(b':',1)[1] for line in head.split(b'\r\n') if line.lower().startswith(b'content-length:')))
+            if len(body) >= length:
+                assert head.startswith(b'HTTP/1.1 200 ')
+                assert body == bytes(i % 251 for i in range(length)), 'pipelined TLS payload changed'
+                return {'tls': tls.version(), 'bytes': length}
+
+
 def tls_context(folder, version, server=False):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER) if server else ssl.create_default_context(cafile=str(folder / "ca.crt"))
     context.minimum_version = context.maximum_version = version
@@ -125,6 +180,7 @@ def sample_process(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--handoff', action='store_true', help='use isolated LINE and LANDING server processes')
     parser.add_argument('--quiet-client', action='store_true', help='warn-level client logs for like-for-like timing runs')
     parser.add_argument('--quiet-seconds', type=float, default=65)
     parser.add_argument('--implementation', choices=['rust-current', 'rust-baseline', 'xray'], default='rust-current')
@@ -139,7 +195,7 @@ def main():
     processes, servers, logs = [], [], []
     stop = threading.Event()
     samples, latencies = [], []
-    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
+    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
               "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "workloads": {}, "limitations": ["no packet-loss/netem or real NAT impairment", "no production credentials or AI provider traffic"]}
@@ -148,6 +204,7 @@ def main():
         # Fresh fixture certificates for long opt-in runs (the fixture default is
         # one day; three days is not sufficient for a 72h test plus setup).
         env = dict(os.environ)
+        env['INTEROP_HANDOFF'] = '1' if args.handoff else '0'
         env['INTEROP_OUTPUT_DIR'] = str((args.output / 'fixture').resolve())
         env['INTEROP_TLS_DAYS'] = str(max(2, int(args.seconds // 86400) + 2))
         node = subprocess.Popen(['bash', str(ROOT / 'scripts/interop/upstream-server.sh')], cwd=ROOT, env=env, stdout=node_log, stderr=subprocess.STDOUT)
@@ -156,7 +213,7 @@ def main():
         while True:
             if node.poll() is not None:
                 raise RuntimeError('isolated upstream failed; inspect node.log')
-            if 'listener_started' in (args.output / 'node.log').read_text():
+            if '"address":"0.0.0.0:14443"' in (args.output / 'node.log').read_text():
                 break
             if time.monotonic() > deadline: raise TimeoutError('upstream startup')
             time.sleep(.1)
@@ -186,6 +243,15 @@ def main():
             except OSError: time.sleep(.05)
         folder = args.output / 'fixture/tls'
         versions = [('tls13', ssl.TLSVersion.TLSv1_3), ('tls12', ssl.TLSVersion.TLSv1_2)]
+        result['pipelining'] = []
+        if not args.direct:
+            for label, version in versions:
+                target = int(values['RRC_INTEROP_' + label.upper()].rsplit(':', 1)[1])
+                for kind, port in [('http', http_port), ('socks', socks_port)]:
+                    proof = pipelined_tls(port, target, kind, tls_context(folder, version))
+                    proof.update(inbound=kind)
+                    result['pipelining'].append(proof)
+
         started = time.monotonic()
         until = started + args.seconds
         endpoints = []

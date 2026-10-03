@@ -49,7 +49,7 @@ def main():
         config=a.output/'client.toml'
         config.write_text(f'''[listen]\nsocks5="127.0.0.1:{port}"\nhttp=""\n[[node]]\nname="isolated-node"\naddress="{node}"\nport=14443\nuserId="{values['RRC_INTEROP_USER_ID']}"\n[node.reality]\npublicKey="{values['RRC_INTEROP_PUBLIC_KEY']}"\nshortId="{values['RRC_INTEROP_SHORT_ID']}"\nserverName="localhost"\n''')
         command=[str(a.binary),'run','--config',str(config),'--log-level','debug']
-    result={'case':a.case,'implementation':a.implementation,'censored':False,'detected':False,'recovered':False}
+    result={'case':a.case,'implementation':a.implementation,'censored':False,'detected':False,'recovered':False,'restore_seconds':float(os.environ.get('RESTORE_SECONDS','5')) if a.case.endswith('transient') else None}
     with (a.output/'client.log').open('w') as log:
         process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT)
         try:
@@ -100,7 +100,7 @@ def main():
                 else:result['censored']=True
                 result['elapsed_seconds']=time.monotonic()-started
                 result['bytes_received']=len(received)
-                result['writer_observation']=writer_result
+                result['writer_observation']=list(writer_result) # snapshot before deliberate cleanup closes the app
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)

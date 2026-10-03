@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--only', choices=['no-session-cost','no-client-keepalive','no-hedge'])
+    parser.add_argument('--only', choices=['no-session-cost','no-client-keepalive','no-hedge','with-user-timeout'])
     parser.add_argument('--revision', default='HEAD')
     parser.add_argument('--output', type=Path, default=ROOT / 'target/ablations')
     args = parser.parse_args()
@@ -26,6 +26,7 @@ def main():
         'no-session-cost': ('src/scheduler.rs', '.saturating_add(self.shared.quality[index].penalty_ms(now_ms))', '.saturating_add(0)'),
         'no-client-keepalive': ('src/transport/socket.rs', '        KEEPALIVE_COUNT,\n    ))', '        KEEPALIVE_COUNT,\n    ))?;\n    socket.set_keepalive(false)'),
         'no-hedge': ('src/scheduler.rs', 'max_spares: MAX_HEDGED_ATTEMPTS,', 'max_spares: 0,'),
+        'with-user-timeout': ('src/transport/socket.rs', '        KEEPALIVE_COUNT,\n    ))', '        KEEPALIVE_COUNT,\n    ))?;\n    socket.set_tcp_user_timeout(Some(Duration::from_secs(60)))?;\n    if socket.tcp_user_timeout()? != Some(Duration::from_secs(60)) { return Err(io::Error::other("user timeout read-back mismatch")); }\n    Ok(())'),
     }
     records = []
     for name, (file, old, new) in variants.items():

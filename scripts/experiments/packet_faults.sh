@@ -39,7 +39,7 @@ ip netns exec "$C" tc qdisc add dev rrc-c root netem loss 100%
 ip netns exec "$S" tc qdisc add dev rrc-s root netem loss 100%
 touch "$OUT/DROPPED"
 if [[ "$CASE" == *transient ]]; then
-  sleep 5
+  sleep "${RESTORE_SECONDS:-5}"
   ip netns exec "$C" tc qdisc del dev rrc-c root
   ip netns exec "$S" tc qdisc del dev rrc-s root
   touch "$OUT/RESTORED"

@@ -35,7 +35,7 @@ command -v python3 >/dev/null || { echo "python3 is required for the TLS 1.3 cov
 mkdir -p "$OUT_DIR"
 
 cleanup() {
-  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" "${COVER_PID:-}" 2>/dev/null || true
+  kill "${SERVER_PID:-}" "${LANDING_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" "${COVER_PID:-}" 2>/dev/null || true
   rm -f "$OUT_DIR/handoff.env"
 }
 trap cleanup EXIT INT TERM
@@ -138,6 +138,28 @@ sed -e "s/PRIVATE_KEY/$PRIVATE_KEY/" \
 
 # Local CI needs no host-interface enumeration. WSL callers may opt in to a
 # reachable host address; a sandbox must not need hostname/ioctl permissions.
+# Optional real LINE -> LANDING path. Both processes use the exact same pinned
+# upstream binary, and all generated material stays inside the ignored fixture.
+if [[ "${INTEROP_HANDOFF:-0}" == "1" ]]; then
+  python3 - "$BINARY" "$OUT_DIR" "${INTEROP_LANDING_PORT:-14452}" <<'PY_HANDOFF'
+import json, subprocess, sys
+from pathlib import Path
+binary, directory, port = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
+keys = json.loads(subprocess.check_output([binary, 'generate', 'x25519', '--json']))
+psk = json.loads(subprocess.check_output([binary, 'generate', 'psk', '--json']))['psk']
+landing = {'role': 'landing', 'listeners': [{'port': port, 'ip': 'ipv4Only', 'ipv4': '127.0.0.1'}],
+           'landing': {'protocol': 'handoff', 'psk': psk, 'privateKey': keys['privateKey']}, 'log': {'level': 'debug'}}
+(directory / 'landing.json').write_text(json.dumps(landing))
+entry = json.loads((directory / 'server.json').read_text())
+entry['outbounds'] = {'landing': {'type': 'handoff', 'address': '127.0.0.1', 'port': port, 'psk': psk, 'landingPublicKey': keys['publicKey']}}
+entry['routing']['default'] = 'landing'
+(directory / 'server.json').write_text(json.dumps(entry))
+PY_HANDOFF
+  "$BINARY" run --config "$OUT_DIR/landing.json" &
+  LANDING_PID=$!
+  wait_for_port "${INTEROP_LANDING_PORT:-14452}"
+fi
+
 WSL_IP="${INTEROP_HOST_ADDRESS:-127.0.0.1}"
 # Plain key=value rather than JSON: the client crate has no JSON reader, and
 # interop evidence should not depend on adding one.

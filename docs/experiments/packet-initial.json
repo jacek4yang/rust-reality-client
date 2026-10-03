@@ -1,0 +1,135 @@
+{
+  "xray-write-blackhole": {
+    "case": "write-blackhole",
+    "implementation": "xray",
+    "censored": true,
+    "detected": false,
+    "recovered": false,
+    "elapsed_seconds": 100.012908918,
+    "bytes_received": 0,
+    "writer_observation": [
+      "OSError"
+    ]
+  },
+  "no-keepalive-write-blackhole": {
+    "case": "write-blackhole",
+    "implementation": "rust-current",
+    "censored": true,
+    "detected": false,
+    "recovered": false,
+    "elapsed_seconds": 100.05960638400006,
+    "bytes_received": 0,
+    "writer_observation": [
+      "OSError"
+    ]
+  },
+  "no-keepalive-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 5.013815466999972,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "xray-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "xray",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 5.014374019999991,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "current-write-blackhole": {
+    "case": "write-blackhole",
+    "implementation": "rust-current",
+    "censored": true,
+    "detected": false,
+    "recovered": false,
+    "elapsed_seconds": 100.07629353200002,
+    "bytes_received": 0,
+    "writer_observation": [
+      "OSError"
+    ]
+  },
+  "xray-idle-blackhole": {
+    "case": "idle-blackhole",
+    "implementation": "xray",
+    "censored": true,
+    "detected": false,
+    "recovered": false,
+    "elapsed_seconds": 100.06555317100003,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  "current-write-transient": {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 6.476830449000005,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  "no-keepalive-idle-blackhole": {
+    "case": "idle-blackhole",
+    "implementation": "rust-current",
+    "censored": true,
+    "detected": false,
+    "recovered": false,
+    "elapsed_seconds": 100.073159799,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  "current-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 5.011198636000017,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "current-idle-blackhole": {
+    "case": "idle-blackhole",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": true,
+    "recovered": false,
+    "terminal": "EOF",
+    "elapsed_seconds": 60.920280999,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  "no-keepalive-write-transient": {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 6.427964574000043,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  "xray-write-transient": {
+    "case": "write-transient",
+    "implementation": "xray",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "elapsed_seconds": 6.418752783000002,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  }
+}
