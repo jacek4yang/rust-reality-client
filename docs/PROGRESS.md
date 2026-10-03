@@ -1,6 +1,6 @@
 # Production-hardening recovery record
 
-Updated 2026-10-03 20:05 UTC. Recovery branch: `checkpoint/production-hardening`,
+Updated 2026-10-03 20:25 UTC. Recovery branch: `checkpoint/production-hardening`,
 draft PR #6. Main and PR #5 remain unchanged. No merge, release or deployment.
 
 Runtime source is `306831977aecbd026c5a68e9e907d356622a3455`; later changes are
@@ -33,3 +33,22 @@ Matched Xray settings reproduce the blackhole bound; A/B shows no speed advantag
 Recovery: `git fetch origin` then `git switch checkpoint/production-hardening`.
 Generated fixture keys and all local runtime configurations stay ignored. The
 committed scripts and sanitized reports are sufficient to rerun the experiments.
+
+
+## Deeper optimization requested at 20:07 UTC
+
+The prior runtime remains the reference. The new proposed runtime adds only a
+ReadBuf boundary correction and a non-compacting outgoing-prefix cursor in
+`src/transport/session.rs`. Binary SHA-256:
+`dd7d0bc42db999195d602d30dc7615c9abe3330e4269694aa3b2dc476a77aaa6`.
+366 offline tests and pinned1.98.1 Clippy pass. The earlier diagnostic red tests
+used1.99.0; the production gates intentionally use the repository's pinned1.98.1.
+Actual Handoff/reset/cancellation/entry-kill smoke passes; fresh mixed recovery
+hour started20:23 UTC and is not yet claimed. Pinned-server interop: all22tests pass in124.43s; MSRV1.85 passes.
+
+The buffer microbenchmark measures removed tail compaction only, not network
+speed. A new real TLS bulk/CPU harness includes origin-only/current/Xray arms;
+the origin-only result is not a theoretical upper bound. Local strace cannot run
+because PTRACE_TRACEME is denied; no permission bypass was attempted. Do not use
+traced timings as throughput comparisons. Before adopting performance claims,
+freeze binaries/harness and repeat both bulk and interactive A/B without builds.

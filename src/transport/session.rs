@@ -123,6 +123,8 @@ pub struct VisionSession<S> {
     readable_at: usize,
     /// sealed records the socket has not taken yet
     outgoing: Vec<u8>,
+    /// Accepted prefix; preserve the allocation without repeatedly moving a tail.
+    outgoing_at: usize,
     /// the record plaintext being assembled
     frame: Vec<u8>,
     response: [u8; RESPONSE_LEN],
@@ -254,6 +256,7 @@ where
             readable: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             readable_at: 0,
             outgoing: Vec::with_capacity(MAX_RECORD_WIRE_LEN),
+            outgoing_at: 0,
             frame: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             response: [0; RESPONSE_LEN],
             response_at: 0,
@@ -288,30 +291,32 @@ where
     }
 
     fn poll_flush_outgoing(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while !self.outgoing.is_empty() {
-            // Bound the write to its own statement: taking the socket's result
-            // inside `match` would keep `outgoing` borrowed across the arms,
-            // which are the only places that shorten it.
-            let written = Pin::new(&mut self.stream).poll_write(context, &self.outgoing);
+        while self.outgoing_at < self.outgoing.len() {
+            let written =
+                Pin::new(&mut self.stream).poll_write(context, &self.outgoing[self.outgoing_at..]);
             match written {
                 // A zero-length write on an established socket is the way tokio
                 // reports that the peer is gone.
                 Poll::Ready(Ok(0)) => {
                     self.outgoing.clear();
+                    self.outgoing_at = 0;
                     return Poll::Ready(Err(
                         self.fail(Error::Transport(TransportError::BrokenPipe))
                     ));
                 }
                 Poll::Ready(Ok(count)) => {
-                    self.outgoing.drain(..count);
+                    self.outgoing_at += count;
                 }
                 Poll::Ready(Err(error)) => {
                     self.outgoing.clear();
+                    self.outgoing_at = 0;
                     return Poll::Ready(Err(self.fail(socket_failure(&error))));
                 }
                 Poll::Pending => return Poll::Pending,
             }
         }
+        self.outgoing.clear();
+        self.outgoing_at = 0;
         Poll::Ready(Ok(()))
     }
 
@@ -364,10 +369,11 @@ where
         if self.peer_closed {
             return Poll::Ready(Ok(()));
         }
+        let before = buffer.filled().len();
         let outcome = Pin::new(&mut self.stream).poll_read(context, buffer);
         match outcome {
             Poll::Ready(Ok(())) => {
-                if buffer.filled().is_empty() {
+                if buffer.filled().len() == before {
                     self.peer_closed = true;
                 }
                 Poll::Ready(Ok(()))
@@ -525,7 +531,7 @@ impl<S> fmt::Debug for VisionSession<S> {
             // belongs to the application and is not this client's to print.
             .field("incoming", &self.incoming.len())
             .field("readable", &self.readable.len())
-            .field("outgoing", &self.outgoing.len())
+            .field("outgoing", &(self.outgoing.len() - self.outgoing_at))
             .field("awaiting_response", &self.awaiting_response)
             .field("downlink", &self.downlink)
             .field("peer_closed", &self.peer_closed)
@@ -545,6 +551,12 @@ where
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        // A full ReadBuf is not an EOF observation and must not consume wire
+        // state. In Direct mode a zero-capacity socket read can return zero
+        // despite queued data; interpreting that as FIN loses a live stream.
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         if let Some(error) = this.failure() {
             return Poll::Ready(Err(into_io_error(&error)));
         }
@@ -1232,6 +1244,139 @@ mod tests {
 
     /// A refusal is the node's own answer, so it is reported as a rejection rather
     /// than as a broken stream.
+    /// A bounded test transport, alternating short accepts with a wake/Pending.
+    struct PartialSink {
+        accepted: Vec<u8>,
+        pending: bool,
+        chunk: usize,
+    }
+
+    impl AsyncRead for PartialSink {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for PartialSink {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.pending {
+                self.pending = false;
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let count = bytes.len().min(self.chunk);
+            self.accepted.extend_from_slice(&bytes[..count]);
+            self.pending = true;
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_writes_keep_the_tail_in_place_and_append_without_replay() {
+        let (outbound, _, _, inbound) = layers();
+        let mut session = VisionSession::from_channels(
+            PartialSink {
+                accepted: Vec::new(),
+                pending: false,
+                chunk: 3,
+            },
+            Negotiated {
+                suite: SUITE,
+                alpn: None,
+                key_share_group: X25519_GROUP,
+            },
+            inbound,
+            outbound,
+            USER,
+        )
+        .expect("session");
+        session.outgoing.extend_from_slice(b"first-record");
+        std::future::poll_fn(|context| {
+            assert!(session.poll_flush_outgoing(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            session.outgoing, b"first-record",
+            "a partial write must not compact the remaining tail"
+        );
+        assert_eq!(session.outgoing_at, 3);
+        // Shutdown may append its authenticated alert behind a partially sent
+        // application record. Its predecessor must not be replayed or skipped.
+        session.outgoing.extend_from_slice(b"-close-record");
+        std::future::poll_fn(|context| session.poll_flush_outgoing(context))
+            .await
+            .expect("drains");
+        assert_eq!(session.stream.accepted, b"first-record-close-record");
+        assert!(session.outgoing.is_empty());
+        assert_eq!(session.outgoing_at, 0);
+    }
+
+    #[tokio::test]
+    async fn a_zero_capacity_direct_read_does_not_fabricate_peer_eof() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"transition", Command::Direct).await;
+        let mut first = [0; 10];
+        session.read_exact(&mut first).await.expect("transition");
+        assert_eq!(session.downlink(), Downlink::Direct);
+        node.send_raw(b"still alive").await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), session.read(&mut []))
+                .await
+                .expect("an empty Direct read must not wait for socket data")
+                .expect("empty read"),
+            0
+        );
+        assert!(!session.peer_closed(), "no capacity is not peer EOF");
+        let mut later = [0; 11];
+        session
+            .read_exact(&mut later)
+            .await
+            .expect("next real read");
+        assert_eq!(&later, b"still alive");
+    }
+
+    #[tokio::test]
+    async fn direct_eof_is_relative_to_a_prefilled_read_buffer() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"transition", Command::Direct).await;
+        session.read_exact(&mut [0; 10]).await.expect("transition");
+        node.stream.shutdown().await.expect("node FIN");
+        let mut bytes = [0; 16];
+        let mut buffer = ReadBuf::new(&mut bytes);
+        buffer.put_slice(b"prefix");
+        std::future::poll_fn(|context| Pin::new(&mut session).poll_read(context, &mut buffer))
+            .await
+            .expect("orderly EOF");
+        assert_eq!(buffer.filled(), b"prefix");
+        assert!(session.peer_closed(), "EOF means no newly appended bytes");
+    }
+
+    #[tokio::test]
+    async fn a_zero_capacity_framed_read_is_immediate_without_consuming_wire() {
+        let (mut session, _node) = answered().await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), session.read(&mut []))
+            .await
+            .expect("an empty read must not wait for a TLS record")
+            .expect("empty read");
+        assert!(!session.peer_closed());
+        assert!(session.incoming.is_empty());
+    }
+
     #[tokio::test]
     async fn a_refusal_is_reported_as_a_rejection() {
         let mut harness = harness();

@@ -195,3 +195,29 @@ each. Quiet intervals are 65 s. After drain: active=0, all 256/32/4/16 permits
 returned, failed=0, panicked=0, FD=11, peak sampled RSS=4872 KiB and client CPU
 time=12.26 s. This run is a healthy/churn mix; the separate recovery-enabled
 hour must be assessed from its own report.
+
+
+## Deeper review: partial writes and ReadBuf boundaries
+
+`readbuf-red.txt` reproduces two defects in the pre-correction implementation:
+a zero-capacity Direct read can mark a live peer closed, and a zero-capacity
+framed read can wait for network bytes unnecessarily. A third regression covers
+EOF appended to a prefilled ReadBuf. These are API-boundary regressions, not
+proof that they caused a particular production AI interruption.
+
+The corrected transport retains an accepted-prefix cursor across partial writes.
+It does not repeatedly compact the unsent tail; buffer size, authentication,
+ordering and backpressure remain unchanged. A partial/Pending/append/drain test
+verifies no replay or omission even if shutdown appends behind a partial record.
+`partial-write-cost.json` and `scripts/experiments/partial_write_cost.rs` isolate
+the old/new buffer operations with matching checksums and an ABBA ordering.
+The tiny-write cases remove substantial compaction work; the full-record case
+has no compaction to remove. Microbenchmark speedups are not network speedups.
+
+`scripts/experiments/bulk_profile.py` adds actual authenticated TLS1.2/TLS1.3
+upload/download, single/four-stream byte/hash-checked transfers and client
+CPU/RSS/FD samples. The direct-origin arm is a fixture control, not a theoretical
+upper bound: proxy buffering changes aggregation/scheduling and the Python TLS
+fixture can bottleneck. `--trace` is diagnostic-only and needs host ptrace
+permission. This cloud host denies PTRACE_TRACEME, so no syscall-profile result
+is claimed here.

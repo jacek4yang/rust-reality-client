@@ -317,8 +317,11 @@ otherwise                                        -> Continue
 
 A non-TLS stream never yields `Record` classification: `NestedRead::Unframed`
 produces a single `End` frame and then outer records whose plaintext is the stream
-verbatim (`src/server/vision.rs:1374-1390`). The client's uplink runs the identical
-detector over the bytes the local application sends.
+verbatim (`src/server/vision.rs:1374-1390`). This Rust client's uplink currently
+continues authenticated Vision framing; it does not run that nested-TLS detector
+or claim uplink Direct. A downlink Direct transition never implicitly disables
+uplink encryption/framing. Any future uplink optimization requires its own
+validated transition state machine and compatibility evidence.
 
 Invariants this repository pins by test and this client must preserve: every
 plaintext byte before a `Direct` frame is delivered in order, no byte is
