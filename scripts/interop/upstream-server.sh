@@ -208,4 +208,5 @@ fi
 
 "$BINARY" run --config "$OUT_DIR/server.json" &
 SERVER_PID=$!
+printf '%s\n' "$SERVER_PID" > "$OUT_DIR/entry.pid"
 wait "$SERVER_PID"

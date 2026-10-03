@@ -29,6 +29,7 @@ import time
 
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosedError
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -180,6 +181,8 @@ def sample_process(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--terminate-node', action='store_true', help='after healthy workload, kill the isolated entry process and require an application-visible terminal failure')
+    parser.add_argument('--with-recovery', action='store_true', help='mix expected origin resets, local cancellation and explicit new application connections')
     parser.add_argument('--node-address', choices=['127.0.0.1','::1','localhost'], default='127.0.0.1')
     parser.add_argument('--entry-family', choices=['both','ipv4','ipv6'], default='both')
     parser.add_argument('--raw-probe-bytes', type=int, default=0, help='diagnostic tiny raw-TCP round trip before TLS workloads')
@@ -192,13 +195,15 @@ def main():
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/rust-reality-client')
     parser.add_argument('--output', type=Path, default=ROOT / 'target/application-soak')
     args = parser.parse_args()
+    if args.terminate_node and args.direct:
+        parser.error('--terminate-node requires the proxy path')
     if args.seconds < 10:
         parser.error('use at least 10 real seconds')
     args.output.mkdir(parents=True, exist_ok=True)
     processes, servers, logs = [], [], []
     stop = threading.Event()
     samples, latencies = [], []
-    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "node_address": args.node_address, "entry_family": args.entry_family, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
+    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "node_address": args.node_address, "with_recovery": args.with_recovery, "entry_family": args.entry_family, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
               "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "workloads": {}, "limitations": ["no packet-loss/netem or real NAT impairment", "no production credentials or AI provider traffic"]}
@@ -281,7 +286,7 @@ def main():
             async with connect(f'wss://localhost:{port}/echo', sock=(socket.create_connection(('127.0.0.1', port), 15) if args.direct else tunnel(proxy, port, kind)), ssl=tls_context(folder, version), proxy=None, ping_interval=None, compression=None, close_timeout=5) as ws:
                 assert ws.transport.get_extra_info('ssl_object').version() == ('TLSv1.3' if label == 'tls13' else 'TLSv1.2')
                 n = 0
-                while time.monotonic() < until:
+                while (short and n == 0) or time.monotonic() < until:
                     size = 65536 if n % 5 == 0 else 128
                     payload = struct.pack('!Q', n) + hashlib.sha256(str(n).encode()).digest() * (size // 32)
                     sent = time.monotonic()
@@ -309,7 +314,13 @@ def main():
                 sock.sendall(b'GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n')
                 with sock.makefile('rb') as stream:
                     assert stream.readline().startswith(b'HTTP/1.1 200')
-                    while stream.readline() != b'\r\n': pass
+                    header_bytes = 0
+                    while True:
+                        line = stream.readline(16385)
+                        if not line: raise EOFError('SSE closed before headers')
+                        header_bytes += len(line)
+                        assert header_bytes <= 16384, 'unbounded SSE headers'
+                        if line == b'\r\n': break
                     sequence = 0
                     while True:
                         line = stream.readline()
@@ -329,6 +340,31 @@ def main():
                 count += 1
                 await asyncio.sleep(.5)
             return count
+
+        async def recovery():
+            count = 0
+            while time.monotonic() < until:
+                kind, proxy = ('http', http_port) if count % 2 == 0 else ('socks', socks_port)
+                endpoint = endpoints[count % 2]
+                _, version, port, _ = endpoint
+                async with connect(f'wss://localhost:{port}/reset', sock=tunnel(proxy, port, kind), ssl=tls_context(folder, version), proxy=None, ping_interval=None, compression=None, close_timeout=5) as ws:
+                    await ws.send(b'RESET-FIXTURE')
+                    try:
+                        await asyncio.wait_for(ws.recv(), 10)
+                    except ConnectionClosedError:
+                        pass # the fixture deliberately aborts the origin transport
+                    else:
+                        raise AssertionError('injected origin reset was hidden')
+                # Recovery is an explicit NEW application connection, never a
+                # replay inside the proxy. It must not disturb the long streams.
+                await wss(kind, proxy, endpoint, True)
+                async with connect(f'wss://localhost:{port}/cancel', sock=tunnel(proxy, port, kind), ssl=tls_context(folder, version), proxy=None, ping_interval=None, compression=None, close_timeout=5) as ws:
+                    await ws.send(b'cancel-after-established-write' * 1024)
+                    ws.transport.abort()
+                await wss(kind, proxy, endpoint, True)
+                count += 1
+                await asyncio.sleep(min(30, max(0, until-time.monotonic())))
+            return {'origin_resets': count, 'local_cancellations': count, 'explicit_reconnections': count * 2}
 
         def sample():
             while not stop.is_set():
@@ -352,7 +388,25 @@ def main():
                         tasks.append(asyncio.create_task(record(f'wss-{kind}-{endpoint[0]}', wss(kind, proxy, endpoint))))
                         tasks.append(asyncio.create_task(record(f'sse-{kind}-{endpoint[0]}', asyncio.to_thread(sse, kind, proxy, endpoint))))
                 tasks.append(asyncio.create_task(record('churn', churn())))
+                if args.with_recovery:
+                    tasks.append(asyncio.create_task(record('recovery', recovery())))
                 await asyncio.gather(*tasks)
+                if args.terminate_node:
+                    _, version, port, _ = endpoints[0]
+                    async with connect(f'wss://localhost:{port}/node-termination', sock=tunnel(http_port, port, 'http'), ssl=tls_context(folder, version), proxy=None, ping_interval=None, compression=None, close_timeout=5) as ws:
+                        marker = b'connected-before-node-termination'
+                        await ws.send(marker)
+                        assert await asyncio.wait_for(ws.recv(), 10) == marker
+                        entry_pid = int((args.output / 'fixture/entry.pid').read_text())
+                        killed = time.monotonic()
+                        os.kill(entry_pid, signal.SIGKILL)
+                        try:
+                            await asyncio.wait_for(ws.recv(), 10)
+                        except ConnectionClosedError:
+                            result['node_termination'] = {'terminal_visible': True, 'elapsed_seconds': time.monotonic()-killed, 'proxy_still_running': client.poll() is None}
+                        else:
+                            raise AssertionError('entry termination was hidden')
+                        assert result['node_termination']['proxy_still_running']
             finally:
                 for task in tasks: task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)

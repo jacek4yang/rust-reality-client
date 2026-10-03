@@ -171,8 +171,8 @@ more stable connection — they get a different failure. The names and values, a
 If one of these genuinely needs to change for your network, change it in the source and
 rebuild; the value you wrote in a file would have told you nothing about what it cost.
 
-Two absences are also deliberate and are argued with measurements rather than in the
-abstract: no socket in this client sets `TCP_USER_TIMEOUT`, and there is no read-idle
+Linux/Android sockets request a 60 s `TCP_USER_TIMEOUT`, supported by the
+controlled pending-data experiments below. There is no userspace read-idle
 deadline for an authenticated session. See
 [Long-lived connections and socket policy](#long-lived-connections-and-socket-policy).
 
@@ -313,13 +313,13 @@ stream back that arrives a few kilobytes at a time. Two of those three states lo
 exactly like a dead connection to anything that measures silence, so the
 mechanisms that answer "is this still working" are kept apart deliberately.
 
-### Four mechanisms, and only one of them is this client's
+### Four distinct mechanisms
 
 | | The question it answers | Where | The bound |
 | --- | --- | --- | --- |
 | **A** | Did *setup* take too long — resolution, the dial race, REALITY authentication, the VLESS request and response? | `DNS_BUDGET`, `CONNECT_BUDGET` (`src/transport/dial.rs:45`, `:53`), `FIRST_BYTE_BUDGET` (`src/handoff.rs:78`) | 5 s, 10 s, 15 s. Finite, on purpose: an unanswered setup question gains nothing from being asked longer. |
-| **B** | Is a socket still alive — the node's or the application's? | the kernel, armed by `configure` on both halves (`src/transport/socket.rs:90`) | 30 s of quiet, then 3 probes 10 s apart — about 60 s, and 59.1 s measured. Retransmission of unacknowledged data is the system's own `tcp_retries2` budget, which this client neither reads nor writes. |
-| **C** | Is a *write* stuck? | nothing: `carry` arms no timer (`src/transport/relay.rs`) | The buffer is fixed at 8 KiB per direction and the loop cannot pull the next chunk until the current one is accepted, so a stuck writer stops reading rather than queueing. The wait ends when the kernel's own retransmission budget ends — a tabled `tcp_retries2` of 15 is 13 to 30 minutes. |
+| **B** | Is a socket still alive — the node's or the application's? | the kernel, armed by `configure` on both halves (`src/transport/socket.rs:90`) | 30 s of quiet, then 3 probes 10 s apart — about 60 s, and 59.1 s measured. Linux/Android also request per-socket `TCP_USER_TIMEOUT=60000`; no global `tcp_retries2` setting is changed. |
+| **C** | Is a *write* stuck? | nothing: `carry` arms no timer (`src/transport/relay.rs`) | The buffer is fixed at 8 KiB per direction and the loop cannot pull the next chunk until the current one is accepted, so a stuck writer stops reading rather than queueing. On Linux/Android the per-socket pending-data timeout bounds this wait; observed application detection is about 61–79 s, not an exact deadline. Other platforms retain their kernel retransmission policy. |
 | **D** | Is the *request* going well? | the application | Outside this proxy. A provider's own request deadline, its WebSocket Ping/Pong policy and its SSE keep-alive comments are the application's business; this client carries those bytes and does not manufacture them. |
 
 What is *not* in the table is the point of the section: there is no per-direction
@@ -383,7 +383,7 @@ The six runs, on Linux 6.6 with the shipped 30/10/3 window armed on both sockets
 | `stalled-peer-backpressure` | 1 MiB to the same peer | the write **stalled 7980 ms**, then everything arrived; the client's own buffer never grew |
 | `outage-during-bulk` | 5 s outage *while* 1 MiB was in flight | the write cost 6515 ms and the transfer **completed** — retransmission, not keepalive, is what protected it |
 
-Read those four ways:
+**Historical keepalive-only interpretation (before the current user-timeout policy):**
 
 * **Idle-blackhole detection is ~60 s, and it is the armed window, not a userspace
   timer.** The 59.1 s is 30 + 3 × 10 minus scheduling, and no timer exists in the
@@ -580,7 +580,7 @@ python3 -m venv target/soak-venv
 target/soak-venv/bin/pip install websockets==15.0.1
 INTEROP_BINARY=/absolute/path/to/rust-reality \
   target/soak-venv/bin/python scripts/interop/application_soak.py \
-  --seconds 3600 --handoff --output target/acceptance
+  --seconds 3600 --handoff --with-recovery --output target/acceptance
 ```
 
 `--handoff` starts isolated LINE and LANDING processes. Both use the pinned

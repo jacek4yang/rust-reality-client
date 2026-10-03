@@ -34,8 +34,8 @@ write cases send and verify 8 MiB through the proxy and server echo destination.
 
 The workflow's green status means its specified assertions passed, including
 transient recovery and result completeness. It does not turn censored cases
-into successful detection. A per-socket user-timeout control is being tested
-separately before any decision to change the shipped policy.
+into successful detection. The subsequently completed user-timeout controls below justify the current
+Linux/Android per-socket policy. This initial result is retained as the negative baseline.
 
 ## Timing and ablations
 
@@ -144,5 +144,45 @@ can also set keepalive idle/interval and TCP user timeout. The additional
 `xray-aligned-timers` CI job sets idle=30 s, interval=10 s and user timeout=60000 ms
 on both edges, and repeats transient/blackhole cases twice. It does not assume
 Xray will fail. Retry count remains Xray's setting; the explicit user timeout
-bounds the comparison. Until its result is recorded, this is an experiment plan,
-not a passed aligned-policy comparison.
+bounds the comparison. `xray-aligned-timers.json` now records all eight passing cases from
+[run 37148161890](https://github.com/jacek4yang/rust-reality-client/actions/runs/37148161890).
+Both repetitions detect idle blackholes in 61.04–61.05 s and writing blackholes
+in 78.53 s, and recover from the tested 40-second outages (8 MiB byte-exact for
+writing cases). This reproduces the liveness benefit in Xray: it is a socket
+policy benefit, not an exclusive Rust implementation advantage.
+
+
+## Final frozen A/B and delivered-build checks
+
+`comparison-final.json.gz` contains a second complete twelve-run series, frozen
+at source/harness `3068319` and the final runtime binary hash above. The fixed
+background workload is documented inside the report. Four 120-second runs per
+arm all pass; the median of per-run tail measurements is:
+
+| Arm | P95 ms | P99 ms | P99 range ms | Maximum sampled RSS KiB |
+|---|---:|---:|---:|---:|
+| PR5 baseline | 1.794 | 3.050 | 2.486–3.504 | 4676 |
+| Final runtime | 1.819 | 3.136 | 2.445–3.731 | 4856 |
+| Xray 26.9.9 | 1.838 | 2.652 | 2.512–3.125 | 46580 |
+
+There is no demonstrated speed advantage. The candidate retains low measured
+RSS in this workload while adding feedback and observability. These data do not
+establish global memory efficiency, WAN reliability, or provider-API behavior.
+
+Candidate artifacts from [run 37147589214](https://github.com/jacek4yang/rust-reality-client/actions/runs/37147589214)
+were downloaded, checked against both the artifact ZIP digests and the generated
+SHA256SUMS, then the GNU and musl x86_64 executables were actually exercised for
+20 seconds each through LINE→LANDING, TLS/WSS/SSE, pipelining, origin reset and
+explicit application reconnection. `artifact-runtime-smokes.json` holds these
+reports. ARM64 is built and checksummed, not executed. These are CI candidate
+artifacts, not a published release.
+
+`quality-review-red.txt` and `quality-window-red.txt` preserve red-before review
+regressions for stale evidence, unknown-family attribution and the bounded
+strike window. The corresponding corrected tests are in `scheduler/quality.rs`.
+
+Recovery is explicit: `--with-recovery` adds deliberate origin resets, local
+transport cancellation, and new application connections. It does not migrate or
+replay established sessions. `--terminate-node` adds a separate post-workload
+SIGKILL of only the isolated fixture entry process and checks that the application
+sees a terminal failure while the proxy remains alive.

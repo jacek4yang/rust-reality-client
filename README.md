@@ -14,8 +14,8 @@ rust-reality-client doctor --config client.toml  # is it reachable, and who is a
 rust-reality-client run    --config client.toml  # SOCKS5 127.0.0.1:10808, HTTP 127.0.0.1:10809
 ```
 
-No Xray process, no Go runtime, no shared library: one static-ish binary and one
-TOML file. The server is not modified, configured differently, or restarted.
+No Xray process or Go runtime: one native executable and one TOML file.
+The Linux musl artifact is static; GNU artifacts require the platform C runtime. The server is not modified, configured differently, or restarted.
 
 ---
 
@@ -408,12 +408,13 @@ the node's own 120 s write-stall bound (`src/io_activity.rs:14` upstream), so th
 client learns a peer is gone from its own socket rather than losing that race, and a
 test asserts both the arithmetic and the inequality.
 
-Tolerance is a separate number and it is not a duration. An outage that swallowed one
+The earlier keepalive-only measurements below are historical. Tolerance also depends
+on outage timing and peer policy. An outage that swallowed one
 probe slot was survived; an outage that covered all three slots killed the session
 **even after connectivity returned**, because both ends had already been told the
 socket was dead. A socket that is *carrying* bytes is not subject to that at all — a
 5 s outage in the middle of a 1 MiB write cost 6.5 s and the transfer completed on
-retransmission alone. Deliberately absent:
+retransmission alone. Current policy:
 
 * **A 60 s per-socket `TCP_USER_TIMEOUT` on Linux/Android.** Actual packet-loss
   experiments exposed the gap in keepalive-only handling when data is outstanding.
@@ -659,14 +660,12 @@ Known rough edges worth naming:
   without the proxy. This server limitation is not fixed by changing clients;
   TLS/WSS/SSE acceptance does not establish arbitrary tiny raw-TCP behavior.
 
-* A session that stays **quiet** through an outage covering all three probe slots —
-  about 40 s of the armed 30/10/3 window — is lost even when the path heals inside a
-  minute, because both ends' kernels have already been told the socket is dead
-  (section 13). The earlier bulk experiment used a **5 s** outage, not the 40 s
-  quiet-outage schedule: it cost 6.5 s and completed. Those are different cases.
-  Raising the tolerance means raising `KEEPALIVE_COUNT` or `_INTERVAL`, which slows
-  blackhole detection by the same amount, and that trade is measured rather than
-  guessed at.
+* Outage tolerance depends on timing, pending data, peer policy and the kernel.
+  The current Linux tests recover from the tested 5/20/40-second outages; that
+  does not guarantee recovery from every outage of the same length. Once either
+  peer closes a socket, the application must open a new connection. The earlier
+  keepalive-only probe-slot experiment is retained as historical evidence in
+  Operations, not as a prediction of the updated pending-data policy.
 * One `userId` per node, because that is what the file shape describes.
 * `doctor` cannot distinguish clock skew from a wrong key or short id on a failed
   handshake — it says so rather than guessing (section 14).
