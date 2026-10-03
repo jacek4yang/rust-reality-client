@@ -33,13 +33,18 @@ const SHORT_PADDING_RANGE: u32 = 256;
 pub enum Command {
     /// More framed blocks follow.
     Continue = 0,
-    /// Framing ends; every later byte is payload.
+    /// Framing ends; every later record's plaintext is payload.
     End = 1,
-    /// Framing ends at a copy-friendly boundary.
+    /// Framing ends, and so does the record layer around it.
     ///
-    /// To the peer this is indistinguishable from [`Command::End`]: both stop
-    /// framing. The distinction is local only, and lets a relay hand the
-    /// remainder of a record to its destination without re-staging it.
+    /// Both this and [`Command::End`] stop framing, and the frame that carries
+    /// either is the same shape. What the peer does *after* that frame is not:
+    /// after `End` it keeps sealing outer TLS records and only their plaintext
+    /// is unframed (`server/vision.rs:1403-1409`, which advances the direction to
+    /// `DirectionState::Outer`), while after `Direct` it replaces the TLS writer
+    /// for that direction with the socket itself and writes payload bytes
+    /// straight out (`server/vision.rs:1411-1417`, then `:1550-1558`). A receiver
+    /// that cannot tell the two apart opens raw payload as ciphertext.
     Direct = 2,
 }
 
@@ -55,12 +60,21 @@ impl Command {
 }
 
 /// Receiver state after a fragment has been processed.
+///
+/// This is the *framing* state: what the bytes arriving now mean. It is not the
+/// transport state, and [`Command::Direct`] is why the two must be kept apart —
+/// a receiver that stops decoding frames here still has to decide whether the
+/// record layer around those frames stays open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
     /// Frames are still being decoded.
     Framed,
-    /// An `End` or `Direct` command was authenticated; bytes are payload.
+    /// An `End` command was authenticated; every later record's plaintext is
+    /// payload, with the outer record layer still in front of it.
     Raw,
+    /// A `Direct` command was authenticated at a frame boundary; every later
+    /// byte of the socket is payload and there is no record layer left to open.
+    Direct,
 }
 
 /// Errors from decoding Vision framing.
@@ -542,7 +556,8 @@ impl Decoder {
         };
         self.mode = match command {
             Command::Continue => Mode::Framed,
-            Command::End | Command::Direct => Mode::Raw,
+            Command::End => Mode::Raw,
+            Command::Direct => Mode::Direct,
         };
         self.first_frame = false;
         self.header_read = 0;
@@ -746,8 +761,9 @@ mod tests {
             decoder
                 .decode(&plaintext, &mut output)
                 .expect("one plaintext with a transition inside it must decode"),
-            Mode::Raw,
-            "the buffer that carries `Direct` is raw by the time the decoder is done"
+            Mode::Direct,
+            "the buffer that carries `Direct` is past framing by the time the \
+             decoder is done, and reports the transition it actually saw"
         );
         assert_eq!(
             output, b"firstsecondraw tail",
@@ -759,12 +775,53 @@ mod tests {
             decoder
                 .decode(more, &mut output)
                 .expect("raw bytes never stop being payload"),
-            Mode::Raw
+            Mode::Direct
         );
         assert_eq!(
             output, more,
             "and what follows the transition is appended, not re-framed — `decode` \
              reports the bytes of the fragment it was handed"
+        );
+    }
+
+    /// The two terminating commands mean the same thing about *frames* and
+    /// opposite things about the *record layer*, so a decoder that reported them
+    /// identically would leave its caller no way to tell that the difference
+    /// exists: `End` keeps outer TLS records sealed (`server/vision.rs:1403-1409`),
+    /// `Direct` abandons them (`:1411-1417` with `:1550-1558`).
+    #[test]
+    fn end_and_direct_are_the_same_framing_and_different_transitions() {
+        let emitted = |command: Command| {
+            let mut encoder = encoder();
+            let plan = encoder
+                .plan(3, command, false)
+                .expect("small frame must plan");
+            let mut wire = vec![0_u8; plan.wire_len()];
+            encoder.assemble(&plan, b"abc", &mut wire);
+            encoder.commit(&plan);
+            wire
+        };
+
+        let mut output = Vec::new();
+        let mut ended = Decoder::new(USER);
+        assert_eq!(
+            ended
+                .decode(&emitted(Command::End), &mut output)
+                .expect("end"),
+            Mode::Raw
+        );
+        let mut direct = Decoder::new(USER);
+        assert_eq!(
+            direct
+                .decode(&emitted(Command::Direct), &mut output)
+                .expect("direct"),
+            Mode::Direct
+        );
+        assert_eq!(ended.mode(), Mode::Raw);
+        assert_ne!(
+            ended.mode(),
+            direct.mode(),
+            "one of these keeps the record layer and one does not"
         );
     }
 

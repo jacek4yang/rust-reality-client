@@ -9,8 +9,8 @@
 //! uplink   record 1 =  vless request ‖ frame[ uuid ‖ continue ‖ 0 content ‖ padding ]
 //!          record n =  frame[ continue ‖ content ‖ padding ]
 //! downlink record 1 =  [ 0, 0 ]       ‖ frame[ uuid ‖ continue ‖ 0 content ‖ padding ]
-//!          record n =  frame[…]        …, and after an End or Direct command every
-//!                                       later byte is payload verbatim
+//!          record n =  frame[…]        …until the node stops framing, and then
+//!                                       either verbatim records or a verbatim socket
 //! ```
 //!
 //! Every line above is what the server itself does, not what a client is expected
@@ -35,10 +35,22 @@
 //!   and half-closes the destination (`server/vision.rs:1114-1126`), while any
 //!   other alert fails the direction (`:1127-1130`). That asymmetry is what lets a
 //!   proxied `FIN` reach the destination without killing the reverse direction.
-//! * Framing can stop early. Once the node's nested-TLS classifier gives up it
-//!   sends `End` and every later downlink byte is raw
-//!   (`server/vision.rs:1395-1412`), so the decoder must switch to verbatim
-//!   passthrough at exactly that command, which [`Decoder`] does.
+//! * Framing can stop early, and *which* command stopped it decides what the
+//!   socket is made of afterwards. A node that gives up on classifying its
+//!   destination — a TLS 1.2 origin, or one whose first eight records said
+//!   nothing (`:2159`) — sends `End` and keeps sealing outer TLS records whose
+//!   plaintext is payload (`server/vision.rs:1403-1409` with
+//!   `relay_outer_downlink` at `:1842-1872`, which is `DirectionState::Outer` in
+//!   the server's own vocabulary). A node that recognises a TLS 1.3 origin sends
+//!   `Direct` at that origin's first `application_data` record
+//!   (`:2156-2157`) and then replaces the TLS writer for the direction with the
+//!   socket itself (`:1411-1417`, `:1550-1558`), so every later byte on the wire is
+//!   the destination's own. The distinction is the difference between reading a
+//!   record and reading the stream: [`Decoder`] reports which command ended the
+//!   framing, and [`Downlink`] is what this session does about it. Conflating the
+//!   two is not a cosmetic mistake — it opens raw payload as ciphertext, fails the
+//!   AEAD in the middle of the application's handshake, and does it to exactly the
+//!   TLS 1.3 destinations a long-lived WSS or SSE session is made of.
 
 use std::fmt;
 use std::io;
@@ -53,7 +65,9 @@ use crate::protocol::tls13::{
     ContentType, MAX_PLAINTEXT_LEN, MAX_RECORD_WIRE_LEN, RECORD_HEADER_LEN, RecordError,
     RecordLayer,
 };
-use crate::protocol::vision::{Command, DecodeError, Decoder, EncodeError, Encoder, FramePlan};
+use crate::protocol::vision::{
+    Command, DecodeError, Decoder, EncodeError, Encoder, FramePlan, Mode,
+};
 use crate::protocol::vless::{self, Destination, VISION_FLOW};
 
 /// Size of the VLESS response header, which is the tunnel's readiness signal.
@@ -65,6 +79,25 @@ const CLOSE_NOTIFY: u8 = 0;
 /// `close_notify`, exactly as `tls13/application_io.rs:1010-1013` seals it.
 const CLOSE_NOTIFY_ALERT: [u8; 2] = [1, CLOSE_NOTIFY];
 
+/// What the downlink's byte stream is, as distinct from what its frames are.
+///
+/// The node reaches one of these three states and never leaves it: the two
+/// transitions that leave the first are the two terminating Vision commands, and
+/// they differ in the transport rather than in the framing. Names follow the
+/// server's own direction lifecycle (`crates/rr-session/src/vision.rs:27-47`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Downlink {
+    /// Outer records are opened and their plaintext is Vision framing.
+    Framed,
+    /// Outer records are still opened and their plaintext is payload: the node
+    /// sent `End` (`server/vision.rs:1403-1409`).
+    Outer,
+    /// The socket itself is the payload stream: the node authenticated a
+    /// `Direct` boundary and gave up this direction's record layer
+    /// (`server/vision.rs:1411-1417`, `:1550-1558`).
+    Direct,
+}
+
 /// A Vision-over-TLS session, usable as one bidirectional byte stream.
 ///
 /// One session is one TCP connection to one node. Dropping it abandons the
@@ -72,7 +105,9 @@ const CLOSE_NOTIFY_ALERT: [u8; 2] = [1, CLOSE_NOTIFY];
 ///
 /// Reads and writes are buffered by exactly one record in each direction:
 /// [`MAX_RECORD_WIRE_LEN`] bytes of socket input plus one record's payload, and
-/// one sealed record waiting for the socket. Nothing here grows with the transfer.
+/// one sealed record waiting for the socket. Once the downlink is
+/// [`Downlink::Direct`] the read side holds nothing at all and copies the socket
+/// straight to its caller, so nothing here grows with the transfer either way.
 pub struct VisionSession<S> {
     stream: S,
     negotiated: Negotiated,
@@ -80,6 +115,7 @@ pub struct VisionSession<S> {
     outbound: RecordLayer,
     encoder: Encoder,
     decoder: Decoder,
+    downlink: Downlink,
     /// socket bytes that do not yet make up one whole record
     incoming: Vec<u8>,
     /// payload decoded out of `incoming` and not yet handed to the reader
@@ -102,6 +138,16 @@ impl<S> VisionSession<S> {
     #[must_use]
     pub const fn negotiated(&self) -> &Negotiated {
         &self.negotiated
+    }
+
+    /// What the node's downlink is made of now.
+    ///
+    /// [`Downlink::Direct`] is the only state in which the session stops opening
+    /// outer records, and it is reached by the node's choice, not this client's:
+    /// the uplink keeps framing and sealing records whatever it says.
+    #[must_use]
+    pub const fn downlink(&self) -> Downlink {
+        self.downlink
     }
 
     /// Whether the node has closed its downlink.
@@ -203,6 +249,7 @@ where
             outbound,
             encoder: Encoder::new(user_id).map_err(encoding_failure)?,
             decoder: Decoder::new(user_id),
+            downlink: Downlink::Framed,
             incoming: Vec::with_capacity(MAX_RECORD_WIRE_LEN),
             readable: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             readable_at: 0,
@@ -294,6 +341,44 @@ where
         }
     }
 
+    /// Reads the socket verbatim into the caller's buffer, which is all a `Direct`
+    /// downlink has left to do: the node's bytes are the application's bytes, with
+    /// no record layer and no Vision framing in front of them.
+    ///
+    /// `incoming` is not consulted and `readable` is not staged, because the
+    /// boundary consumed the whole record that carried it — the node seals a
+    /// `Direct` frame and then writes what its destination buffered behind it
+    /// straight to the socket (`server/vision.rs:1550-1558`). Bytes already decoded
+    /// out of that last record are delivered before this is ever reached: the
+    /// caller drains `readable` first.
+    ///
+    /// Socket EOF is the end of the stream rather than a broken tunnel: the node's
+    /// raw relay closes the direction on a zero-length read
+    /// (`server/vision.rs:1653-1662`), and there is no `close_notify` left to wait
+    /// for once the record layer is gone.
+    fn poll_raw(
+        &mut self,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.peer_closed {
+            return Poll::Ready(Ok(()));
+        }
+        let outcome = Pin::new(&mut self.stream).poll_read(context, buffer);
+        match outcome {
+            Poll::Ready(Ok(())) => {
+                if buffer.filled().is_empty() {
+                    self.peer_closed = true;
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => {
+                Poll::Ready(Err(into_io_error(&self.fail(socket_failure(&error)))))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Total wire length of the record `incoming` is assembling.
     ///
     /// While even the fixed-size header is missing this is the header length, so
@@ -351,11 +436,16 @@ where
     }
 
     /// Decrypts the buffered record of `len` bytes and routes its plaintext.
+    ///
+    /// Only ever called while [`Downlink`] is not [`Downlink::Direct`]: a node that
+    /// took the Direct transition sealed nothing more on this direction, so the
+    /// bytes that follow are not a record and must not be opened as one.
     fn dispatch_record(&mut self, len: usize) -> Result<(), Error> {
         let Self {
             incoming,
             inbound,
             decoder,
+            downlink,
             readable,
             response,
             response_at,
@@ -378,9 +468,18 @@ where
                     }
                 }
                 if !framed.is_empty() {
-                    decoder
+                    // Whatever the decoder says afterwards is the node's decision
+                    // about this direction, and it is final: `Raw` means the record
+                    // layer in front of these plaintext bytes stays, `Direct` means
+                    // the socket's next byte is the destination's.
+                    *downlink = match decoder
                         .decode_append(framed, readable)
-                        .map_err(framing_failure)?;
+                        .map_err(framing_failure)?
+                    {
+                        Mode::Framed => *downlink,
+                        Mode::Raw => Downlink::Outer,
+                        Mode::Direct => Downlink::Direct,
+                    };
                 }
                 Ok(())
             }
@@ -428,6 +527,7 @@ impl<S> fmt::Debug for VisionSession<S> {
             .field("readable", &self.readable.len())
             .field("outgoing", &self.outgoing.len())
             .field("awaiting_response", &self.awaiting_response)
+            .field("downlink", &self.downlink)
             .field("peer_closed", &self.peer_closed)
             .field("local_closed", &self.local_closed)
             .field("failure", &self.failed)
@@ -460,6 +560,9 @@ where
             }
             this.readable.clear();
             this.readable_at = 0;
+            if this.downlink == Downlink::Direct {
+                return this.poll_raw(context, buffer);
+            }
             if this.peer_closed {
                 return Poll::Ready(Ok(()));
             }
@@ -718,6 +821,14 @@ mod tests {
             self.stream.write_all(&wire).await.expect("write");
         }
 
+        /// Writes bytes to the socket that are *not* a record of anything: what the
+        /// node does to its own write half once it has taken the `Direct` transition
+        /// (`server/vision.rs:1550-1558`, where `client.into_inner()` replaces the
+        /// TLS writer with the socket).
+        async fn send_raw(&mut self, bytes: &[u8]) {
+            self.stream.write_all(bytes).await.expect("write");
+        }
+
         /// The empty padded record v2.0.1 puts in front of its own preamble
         /// whenever it issued a fake New Session Ticket (`reality/handshake.rs`
         /// module doc, `tls13/handshake.rs:503-510`).
@@ -757,6 +868,23 @@ mod tests {
                 .expect("frame plan");
             let mut plaintext = vec![0_u8; plan.wire_len()];
             self.encoder.assemble(&plan, content, &mut plaintext);
+            self.encoder.commit(&plan);
+            self.send(ContentType::ApplicationData, &plaintext).await;
+        }
+
+        /// Frames `content` and puts `tail` behind it in the *same* record, which
+        /// is what a record that carries more than one frame looks like
+        /// (`server/vision.rs:1431-1480`). When `command` terminates framing,
+        /// `tail` is payload that was authenticated inside the last sealed record.
+        async fn frame_and_tail(&mut self, content: &[u8], command: Command, tail: &[u8]) {
+            let plan = self
+                .encoder
+                .plan(content.len(), command, false)
+                .expect("frame plan");
+            let mut plaintext = vec![0_u8; plan.wire_len() + tail.len()];
+            self.encoder
+                .assemble(&plan, content, &mut plaintext[..plan.wire_len()]);
+            plaintext[plan.wire_len()..].copy_from_slice(tail);
             self.encoder.commit(&plan);
             self.send(ContentType::ApplicationData, &plaintext).await;
         }
@@ -921,8 +1049,10 @@ mod tests {
     }
 
     /// v2.0.1 stops framing the moment its nested-TLS classifier gives up: the
-    /// `End` frame is the last framed byte of the stream, and every later byte is
-    /// payload as-is (`server/vision.rs:1395-1412`).
+    /// `End` frame is the last framed byte of the stream, and every later record's
+    /// plaintext is payload as-is (`server/vision.rs:1403-1409`, which advances the
+    /// direction to `DirectionState::Outer` and keeps sealing through
+    /// `relay_outer_downlink` at `:1842-1872`).
     #[tokio::test]
     async fn an_end_command_ends_framing_for_the_rest_of_the_stream() {
         let (mut session, mut node) = answered().await;
@@ -937,6 +1067,167 @@ mod tests {
         }
         assert_eq!(received, b"framedraw tail");
         assert_eq!(session.decoder.mode(), Mode::Raw);
+        assert_eq!(
+            session.downlink(),
+            Downlink::Outer,
+            "`End` ends framing and leaves the record layer standing"
+        );
+    }
+
+    /// `Direct` is a different transition, and the difference is the transport, not
+    /// the framing: the node authenticates the boundary, drops its TLS writer for
+    /// that direction and writes the destination's bytes straight to the socket
+    /// (`server/vision.rs:1411-1417`, then `:1550-1558`).
+    ///
+    /// This is the shape every TLS 1.3 destination produces — the node classifies
+    /// the origin's `ServerHello`, then takes `Direct` at its first
+    /// `application_data` record (`:2156-2157`) — so a client that reads the bytes
+    /// after the boundary as outer records is not merely untidy: it opens raw
+    /// payload as ciphertext, fails the AEAD, and kills the tunnel in the middle of
+    /// the application's own handshake.
+    #[tokio::test]
+    async fn a_direct_command_ends_the_outer_record_layer_too() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"framed", Command::Direct).await;
+        node.send_raw(b"raw tail").await;
+
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 16];
+        while received.len() < 14 {
+            let read = session.read(&mut buffer).await.expect("reads");
+            received.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(
+            received, b"framedraw tail",
+            "the framed content and then the socket's own bytes, in order"
+        );
+        assert_eq!(
+            session.downlink(),
+            Downlink::Direct,
+            "the session stopped opening records, not just decoding frames"
+        );
+        assert_eq!(
+            session.decoder.mode(),
+            Mode::Direct,
+            "and it can still say which command told it to"
+        );
+        assert_eq!(
+            session.failure(),
+            None,
+            "reading past a Direct boundary must not be a record failure"
+        );
+    }
+
+    /// The boundary is a byte, not a record: everything the node sealed *up to and
+    /// including* the `Direct` frame is delivered before one raw byte is read, and
+    /// the part of that last record which fell behind the frame is payload like any
+    /// other (`protocol/vless/vision.rs:247-251` hands the remainder of the
+    /// fragment to the caller at the transition).
+    ///
+    /// A reader that flipped to raw mode when it saw the command byte, rather than
+    /// when the frame was complete, would lose this record's padding accounting and
+    /// deliver the tail twice or not at all.
+    #[tokio::test]
+    async fn a_direct_transition_delivers_its_own_record_before_the_socket() {
+        let (mut session, mut node) = answered().await;
+        node.frame_and_tail(b"head", Command::Direct, b"in-record")
+            .await;
+        node.send_raw(b"on-socket").await;
+
+        let expected = b"headin-recordon-socket";
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 7];
+        while received.len() < expected.len() {
+            let read = session.read(&mut buffer).await.expect("reads");
+            assert_ne!(
+                read,
+                0,
+                "the stream has {} bytes and no end of it yet",
+                expected.len()
+            );
+            received.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(
+            received, expected,
+            "sealed payload first, then the socket's, each byte exactly once"
+        );
+        assert_eq!(session.downlink(), Downlink::Direct);
+    }
+
+    /// The two transitions are independent per direction, and the *other* direction
+    /// keeps its framing and its record layer: only `finish_downlink_direct` gives
+    /// up the TLS writer, while the uplink reader stays in `relay_uplink_framed`
+    /// and still reads outer records until an authenticated `close_notify`
+    /// (`server/vision.rs:1114-1125`).
+    ///
+    /// A client that treated `Direct` as a session-wide property would stop framing
+    /// its uplink here, and the node would fail the session on a plaintext read.
+    #[tokio::test]
+    async fn a_direct_downlink_leaves_the_uplink_framed_and_sealed() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"go", Command::Direct).await;
+        node.send_raw(b"\x17\x03\x03\x00\x04ping").await;
+
+        let expected = b"go\x17\x03\x03\x00\x04ping";
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 8];
+        while received.len() < expected.len() {
+            let read = session.read(&mut buffer).await.expect("reads");
+            assert_ne!(
+                read,
+                0,
+                "the raw downlink has {} bytes and no end of it yet",
+                expected.len()
+            );
+            received.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(received, expected);
+
+        session
+            .write_all(b"still framed")
+            .await
+            .expect("the uplink still frames");
+        assert_eq!(node.receive_frame().await, b"still framed");
+
+        session
+            .shutdown()
+            .await
+            .expect("the uplink still ends with an alert");
+        let (kind, alert) = node.receive().await;
+        assert_eq!(kind, ContentType::Alert);
+        assert_eq!(alert, vec![1, 0]);
+    }
+
+    /// Past a Direct boundary the socket *is* the stream, so its end of stream is
+    /// the end of the downlink: the node's raw relay closes the direction on a
+    /// read of zero bytes (`server/vision.rs:1653-1662`, after
+    /// `run_directional`). There is no outer `close_notify` left to wait for, and
+    /// demanding one turns every completed WSS response into a broken pipe.
+    #[tokio::test]
+    async fn end_of_socket_after_a_direct_command_reads_as_end_of_stream() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"tail", Command::Direct).await;
+        node.send_raw(b"last").await;
+        node.stream.shutdown().await.expect("half close");
+
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 8];
+        loop {
+            let read = session
+                .read(&mut buffer)
+                .await
+                .expect("a closed raw stream is not a failure");
+            if read == 0 {
+                break;
+            }
+            received.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(received, b"taillast");
+        assert!(session.peer_closed(), "the downlink ended");
+        assert!(
+            session.failure().is_none(),
+            "EOF at a raw boundary is the end of the stream, not a broken tunnel"
+        );
     }
 
     /// A refusal is the node's own answer, so it is reported as a rejection rather

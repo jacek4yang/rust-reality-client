@@ -6,7 +6,7 @@
 //! they need the server, and the server needs a TLS 1.3 cover:
 //!
 //! ```text
-//! scripts/interop/upstream-server.sh          # starts cover + echo + v2.0.1 entry
+//! scripts/interop/upstream-server.sh   # cover + echo + faults + TLS origins + v2.0.1 entry
 //! set -a; . target/interop/handoff.env; set +a
 //! cargo test --test interop_v201 -- --ignored --test-threads=1
 //! ```
@@ -32,7 +32,8 @@ use rust_reality_client::protocol::reality::{
 use rust_reality_client::protocol::vless::Destination;
 use rust_reality_client::scheduler::{Policy, Scheduler};
 use rust_reality_client::transport::{
-    AddressFamily, Dial, DialPolicy, Environment, Transferred, Tuning, VisionSession, carry,
+    AddressFamily, Dial, DialPolicy, Downlink, Environment, Transferred, Tuning, VisionSession,
+    carry,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -284,9 +285,12 @@ async fn session_to_echo() -> VisionSession<TcpStream> {
 /// Everything before this proves the tunnel is authenticated; this proves the
 /// tunnel is *useful*. v2.0.1 writes the `[0, 0]` response only after it has
 /// connected to the destination, so `connect` returning is already half the
-/// claim — the round trips prove the framed uplink, the node's switch to raw
-/// bytes once its nested-TLS detector gives up on non-TLS traffic, and that no
-/// byte was altered, duplicated or reordered across either layout.
+/// claim — the round trips prove the framed uplink, the node's `End` decision
+/// once its nested-TLS detector gives up on traffic that is not TLS at all
+/// (`server/vision.rs:1374-1390`), which stops framing but keeps sealing outer
+/// records, and that no byte was altered, duplicated or reordered across either
+/// layout. The two transitions are separate tests, not one: see
+/// [`a_tls_1_3_destination_ends_framing_and_the_record_layer_too`].
 #[tokio::test]
 #[ignore = "requires a live rust-reality v2.0.1 server and its echo target"]
 async fn a_vision_session_carries_bytes_both_ways_through_v201() {
@@ -436,6 +440,192 @@ async fn the_relay_carries_and_half_closes_through_v201() {
     );
     if let Some(error) = learned {
         panic!("the relay reported a failure it survived: {error}");
+    }
+}
+
+/// The nested TLS client, as a child process pointed at this test's relay.
+///
+/// The application on the other side of the tunnel has to be a real TLS peer. A
+/// client that keeps opening outer records after the node handed the direction
+/// over raw does not hand us a byte to compare — it fails the peer's handshake,
+/// and only OpenSSL can be the one to notice. The driver verifies the chain the
+/// fixture's CA minted, checks the hostname, and walks the body byte for byte.
+fn tls_driver(address: SocketAddr, expect_version: &str) -> tokio::process::Child {
+    let python = std::env::var("RRC_INTEROP_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    tokio::process::Command::new(&python)
+        .arg("scripts/interop/tls_client.py")
+        .arg("--connect")
+        .arg(address.to_string())
+        .arg("--ca")
+        .arg("target/interop/tls/ca.crt")
+        .arg("--expect-version")
+        .arg(expect_version)
+        // Shorter than the relay's own budget on purpose: a tunnel that stops
+        // delivering bytes must end with the peer's complaint in the report, not
+        // with this test giving up on the peer.
+        .arg("--timeout")
+        .arg("20")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("starting {python} scripts/interop/tls_client.py: {error}"))
+}
+
+/// One `key=value` line from the driver's report.
+fn report_field(report: &str, key: &str) -> u64 {
+    let prefix = format!("{key}=");
+    let line = report
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("the driver reported no {key}; its whole report was:\n{report}"));
+    line[prefix.len()..]
+        .parse()
+        .unwrap_or_else(|error| panic!("{prefix} = {line:?} is not a number: {error}"))
+}
+
+/// Carries one genuine nested TLS handshake through a live session and a live
+/// node, and reports the shape the session's downlink ended up in.
+///
+/// The relay here is [`carry`], the same function the SOCKS5 and HTTP paths run,
+/// so nothing about the transition is observed through a test-only reader.
+async fn nested_tls_handshake(
+    origin: &str,
+    expect_version: &str,
+) -> (Downlink, Option<Error>, Transferred, String) {
+    let (destination, port) = target(origin);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener for the nested client");
+    let address = listener.local_addr().expect("local address");
+    // Bound before the driver starts: its `connect` lands in the accept queue
+    // while the tunnel is still being built, so there is nothing to race.
+    let driver = tls_driver(address, expect_version);
+
+    let (stream, handshake) = tunnel().await;
+    let mut session = tokio::time::timeout(
+        READ_TIMEOUT,
+        VisionSession::connect(stream, handshake, user_id(), &destination, port),
+    )
+    .await
+    .expect("the node must accept the request inside the budget")
+    .unwrap_or_else(|error| panic!("Vision session to {origin} failed: {error}"));
+
+    let (mut app, _) = tokio::time::timeout(READ_TIMEOUT, listener.accept())
+        .await
+        .expect("the driver must reach the relay inside the budget")
+        .expect("accept the nested client");
+
+    let carried = tokio::time::timeout(LIVE_BUDGET, carry(&mut app, &mut session)).await;
+    let output = tokio::time::timeout(LIVE_BUDGET * 2, driver.wait_with_output())
+        .await
+        .expect("the driver must report inside its own budget")
+        .expect("wait for the driver");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let latched = session
+        .failure()
+        .map_or_else(|| "nothing".to_string(), |error| error.to_string());
+    let counts = match carried {
+        Ok(Ok(counts)) => counts,
+        Ok(Err(error)) => panic!(
+            "the relay failed carrying a nested handshake: {error}\n\
+             the session latched: {latched}\nthe driver said:\n{report}"
+        ),
+        Err(elapsed) => panic!(
+            "the relay never finished inside the budget ({elapsed})\n\
+             the session latched: {latched}\nthe driver said:\n{report}"
+        ),
+    };
+    assert!(
+        output.status.success(),
+        "the nested handshake must succeed, and it is the claim this test makes.\n\
+         the session latched: {latched}\nthe driver said:\n{report}"
+    );
+    (session.downlink(), session.failure(), counts, report)
+}
+
+/// A TLS 1.3 destination: the node stops framing *and* stops sealing.
+///
+/// This is the case the brief calls decisive, because it is the case every long
+/// lived WSS and SSE session is made of. The fixture's leaf is larger than one
+/// 16 KiB record, so the origin's `Certificate` spans several
+/// `application_data` records: the node classifies the `ServerHello` as TLS 1.3
+/// and takes `Direct` at the first of them (`server/vision.rs:2156-2157`),
+/// which leaves the rest of the handshake to travel as plaintext on a socket the
+/// client is no longer allowed to decrypt (`:1411-1417`, `:1550-1558`). A client
+/// that reads `Direct` as `End` opens those bytes as outer TLS records, fails
+/// the AEAD, and loses the connection inside the application's own handshake —
+/// which is why the verdict here is OpenSSL's, not a comparison we wrote.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its TLS origins"]
+async fn a_tls_1_3_destination_ends_framing_and_the_record_layer_too() {
+    let (downlink, failure, counts, report) =
+        nested_tls_handshake("RRC_INTEROP_TLS13", "TLSv1.3").await;
+
+    assert!(
+        report_field(&report, "leaf") > 16 * 1024,
+        "the fixture leaf must exceed one TLS record, or the boundary would not \
+         fall inside the handshake and this would prove much less:\n{report}"
+    );
+    assert_eq!(
+        downlink,
+        Downlink::Direct,
+        "the session must have stopped opening records, not merely stopped framing:\n{report}"
+    );
+    assert_eq!(
+        report_field(&report, "bytes"),
+        64 * 1024,
+        "and bytes kept flowing after the boundary, in the mode the transition left:\n{report}"
+    );
+    assert!(
+        counts.to_local > 64 * 1024,
+        "the flight and the body both came back down the tunnel, got {}",
+        counts.to_local
+    );
+    assert!(
+        counts.to_remote > 0,
+        "and the client's own records reached the origin"
+    );
+    if let Some(error) = failure {
+        panic!("a handshake that completed is not a session failure: {error}");
+    }
+}
+
+/// A TLS 1.2 destination: framing ends, the record layer does not.
+///
+/// The other half of the same transition table. A non-1.3 `ServerHello` makes the
+/// node write `End` (`server/vision.rs:2158`) and continue sealing outer records
+/// whose plaintext is the origin's own TLS 1.2 record layer
+/// (`DirectionState::Outer`, `:1842-1872`). Reading that stream as raw socket
+/// bytes would hand the application ciphertext wrapped in ciphertext, so this is
+/// not a compatibility nicety: it is the same state machine, opposite branch, and
+/// the pair is what makes "stop framing" and "stop wrapping" one test each.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and its TLS origins"]
+async fn a_tls_1_2_destination_ends_framing_but_keeps_the_record_layer() {
+    let (downlink, failure, counts, report) =
+        nested_tls_handshake("RRC_INTEROP_TLS12", "TLSv1.2").await;
+
+    assert_eq!(
+        downlink,
+        Downlink::Outer,
+        "a TLS 1.2 origin must leave the outer record layer standing:\n{report}"
+    );
+    assert_eq!(
+        report_field(&report, "bytes"),
+        64 * 1024,
+        "and the framed-then-outer path must carry the whole body:\n{report}"
+    );
+    assert!(
+        counts.to_local > 64 * 1024,
+        "the flight and the body both came back down the tunnel, got {}",
+        counts.to_local
+    );
+    if let Some(error) = failure {
+        panic!("a handshake that completed is not a session failure: {error}");
     }
 }
 

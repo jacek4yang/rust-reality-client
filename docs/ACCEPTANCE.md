@@ -30,7 +30,7 @@ The four hosts the commands were run on:
 | --- | --- | --- |
 | Windows 10 x64 (`D:\Workspace\rust-reality-client`) | the repository, the local suite, one live interop run | rustc/cargo 1.98.1 MSVC |
 | WSL2 Ubuntu, kernel 6.18.33.1 (`/home/jacek/rrclient`) | a build copy of the same tree: Linux checks, the live interop run with the `/proc` measurements, the release artifact | rustc/cargo 1.98.0 and 1.98.1 GNU |
-| The same WSL2 VM | the `v2.0.1` node and the fault targets, listening on `127.0.0.1:14443`…`:14449` | `rust-reality 2.0.1` |
+| The same WSL2 VM | the `v2.0.1` node, its TLS 1.3 cover, the echo, the four fault targets and the two Vision TLS origins: `127.0.0.1:14443`…`:14451`, cover on `:44443` | `rust-reality 2.0.1`, Python 3.14 |
 | GitHub-hosted `ubuntu-24.04` | the four gates of `ci.yml`, run for real; see box 30 | rustc/cargo 1.98.1 GNU, as pinned by `env.RUST` |
 
 ---
@@ -144,19 +144,54 @@ The four hosts the commands were run on:
   one AEAD plaintext — the shape `docs/PROTOCOL.md` §"Downlink layout the server
   produces" derives from `src/server/vision.rs:1336-1361`.
 
-- [x] **10. Vision is native Rust.** `src/protocol/vision.rs` (12 tests: the first frame's
+- [x] **10. Vision is native Rust.** `src/protocol/vision.rs` (13 tests: the first frame's
   user id, padding bands, the frame-size bound, arbitrary fragment sizes across a 40 KiB
   stream, `wrong_user_id_is_rejected_and_latches`, `arbitrary_bytes_never_panic`) plus the
   live `a_vision_session_carries_bytes_both_ways_through_v201`.
 
-- [x] **11. The `Direct` transition is byte-correct.**
-  `direct_command_ends_framing_without_reordering_the_bytes_around_it` feeds one plaintext
-  containing a `Continue` frame, a `Direct` frame and raw bytes behind it, and asserts
-  they leave in that order with the decoder in `Mode::Raw` — the three invariants
-  `docs/PROTOCOL.md` §"Continue / End / Direct decision" says must hold, including the one
-  a per-frame test cannot see: the tail that arrived in the same buffer.
-  `terminating_command_ends_framing_for_the_rest_of_the_stream` covers `End`, and
-  `Command::End | Command::Direct => Mode::Raw` is one arm in `src/protocol/vision.rs:545`.
+- [x] **11. Stopping Vision framing and stopping the outer record layer are two
+  transitions, and this client keeps them apart.**
+
+  This was a defect, found while auditing the protocol against v2.0.1's own
+  `server/vision.rs` and then repaired: the decoder collapsed `End` and `Direct`
+  into one arm, and the session read whatever followed either as an outer TLS
+  record. After `End` that is right (`DirectionState::Outer`, `:1403-1409`,
+  `:1842-1872`). After `Direct` the node has given up the TLS writer for that
+  direction (`:1411-1417`, `:1550-1558`), so the bytes on the wire are the
+  destination's own — opening them as records fails the AEAD in the middle of the
+  application's handshake, which is precisely the TLS 1.3 traffic a long-lived WSS
+  or SSE session is made of.
+
+  ```sh
+  cargo test --lib -- protocol::vision transport::session
+  set -a; . target/interop/handoff.env; set +a
+  cargo test --offline --test interop_v201 -- --ignored --test-threads=1 destination_ends_framing
+  ```
+
+  `Mode::{Framed, Raw, Direct}` in `src/protocol/vision.rs`, where
+  `end_and_direct_are_the_same_framing_and_different_transitions` pins that the two
+  commands share a frame shape and do not share a transition.
+  `Downlink::{Framed, Outer, Direct}` in `src/transport/session.rs` (17 tests), where
+  `a_direct_command_ends_the_outer_record_layer_too`,
+  `a_direct_transition_delivers_its_own_record_before_the_socket` (boundary ordering,
+  including the tail that arrived in the same buffer),
+  `a_direct_downlink_leaves_the_uplink_framed_and_sealed` (the transition is
+  per-direction: the uplink keeps framing and keeps sealing) and
+  `end_of_socket_after_a_direct_command_reads_as_end_of_stream` (the raw stage's EOF
+  is an orderly end, not a broken pipe) hold the transport half.
+
+  Against the live node, `scripts/interop/tls_origins.py` serves a TLS 1.3 origin
+  whose leaf is larger than one 16 KiB record — its `Certificate` spans several
+  `application_data` records, so the boundary falls *inside* the handshake — and a
+  TLS 1.2 origin that must not reach it. `a_tls_1_3_destination_ends_framing_and_the_record_layer_too`
+  asserts `Downlink::Direct`, `a_tls_1_2_destination_ends_framing_but_keeps_the_record_layer`
+  asserts `Downlink::Outer`, and in both the nested handshake is done by OpenSSL
+  (`scripts/interop/tls_client.py`) through the production `carry` relay against
+  `target/interop/tls/{ca.crt}`: the peer's own certificate verification and AEAD are
+  the integrity check, not a comparison this repository wrote. All 21 interop tests
+  pass with `reality.coverOptimization` both `false` and `true`. At `b446c8d` the TLS
+  1.3 case is red — `session error: session record did not open` on this side,
+  `TimeoutError: The handshake operation timed out` on the peer's.
 
 ## Long connections
 

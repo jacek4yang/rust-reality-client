@@ -257,9 +257,16 @@ else:                                    rand(256)
 then min(candidate, largest value that still fits the frame cap)
 ```
 
-`VisionMode` after a frame: `Continue` → still Framed, `End` → Raw,
-`Direct` → Direct (`:305-316`). Framing stops; the outer TLS records continue,
-carrying raw bytes verbatim.
+`VisionMode` after a frame: `Continue` → still Framed, `End` → `Raw`, `Direct` →
+`Direct` (`:305-316`). Both stop *framing*; they do not stop the same thing. After
+`End` the outer TLS records continue and carry the destination's bytes as their
+plaintext (`DirectionState::Outer` and `relay_outer_downlink`,
+`src/server/vision.rs:1403-1409`, `:1842-1872`). After `Direct` the sender replaces
+the TLS writer for that direction with the socket itself (`:1411-1417`,
+`:1550-1558`), so every later byte on the wire is the destination's own and there
+is no record left to open. Two transitions, two layouts, and one word each in this
+repository: `Raw` is what the *decoder* has stopped doing, `Direct` is what the
+*transport* has become.
 
 ### Uplink layout the server expects
 
@@ -309,8 +316,9 @@ otherwise                                        -> Continue
 ```
 
 A non-TLS stream never yields `Record` classification: `NestedRead::Unframed`
-produces a single `End` frame and then raw bytes (`:1271-1289`). The client's
-uplink runs the identical detector over the bytes the local application sends.
+produces a single `End` frame and then outer records whose plaintext is the stream
+verbatim (`src/server/vision.rs:1374-1390`). The client's uplink runs the identical
+detector over the bytes the local application sends.
 
 Invariants this repository pins by test and this client must preserve: every
 plaintext byte before a `Direct` frame is delivered in order, no byte is
@@ -354,9 +362,16 @@ until the destination reaches EOF and then sends close_notify
 `DownlinkStep::Direct` and the caller performs the raw transfer
 (`:1411-1416`); on the uplink the decoder reports `VisionMode::Direct` mid-record
 and the remaining staged bytes are flushed before the handoff (`:1154-1160`). Both
-commands end framing, so the client's decoder treats them identically as a switch
-to raw bytes — a byte that arrives after either is never reinterpreted as a Vision
-header.
+commands end framing, and nothing after either is ever read as a Vision header
+again. Only one of them ends the record layer, which is why this client keeps two
+transport states rather than one (`Downlink::{Outer, Direct}`,
+`src/transport/session.rs`): an `End` downlink is still a sequence of outer records
+for these keys to open, while a `Direct` one is the destination's own stream — the
+application's ciphertext, never ours to decrypt. Treating the pair as one state was
+the defect that made a TLS 1.3 destination unreadable, and the two live tests
+`a_tls_1_3_destination_ends_framing_and_the_record_layer_too` and
+`a_tls_1_2_destination_ends_framing_but_keeps_the_record_layer` are what pins each
+branch to a real node.
 
 ## Liveness
 

@@ -22,6 +22,10 @@ DROP_PORT="${INTEROP_DROP_PORT:-14446}"
 RST_PORT="${INTEROP_RST_PORT:-14447}"
 TRUNCATE_PORT="${INTEROP_TRUNCATE_PORT:-14448}"
 CLOSED_PORT="${INTEROP_CLOSED_PORT:-14449}"
+# The two TLS origins whose record layers make the node choose Vision `Direct`
+# and Vision `End` respectively. Destinations the node dials, like the echo.
+TLS13_PORT="${INTEROP_TLS13_PORT:-14450}"
+TLS12_PORT="${INTEROP_TLS12_PORT:-14451}"
 # `true` reproduces what a production node does by default: the server keeps warm
 # cover connections and prebuilt cover profiles, whose flight carries the cover's
 # own certificate rather than a freshly forged one.
@@ -79,6 +83,24 @@ wait_for_port "$DROP_PORT"
 wait_for_port "$RST_PORT"
 wait_for_port "$TRUNCATE_PORT"
 
+# The two TLS origins Vision's transition depends on. A node classifies the
+# *destination's* first ServerHello and then commits the direction to one of two
+# shapes for the rest of the connection: TLS 1.3 ends framing at the origin's
+# first `application_data` record and hands the socket over raw, TLS 1.2 ends
+# framing but keeps sealing outer records. The leaf is minted larger than one
+# 16 KiB TLS record so the 1.3 origin's `Certificate` spans several records and
+# the boundary falls inside the handshake, which is where a client that confuses
+# the two transitions loses the connection.
+TLS_DIR="$OUT_DIR/tls"
+bash "$REPO/scripts/interop/tls_chain.sh" "$TLS_DIR"
+python3 "$REPO/scripts/interop/tls_origins.py" \
+  --tls13 "127.0.0.1:$TLS13_PORT" \
+  --tls12 "127.0.0.1:$TLS12_PORT" \
+  --cert "$TLS_DIR/origin.crt" --key "$TLS_DIR/origin.key" &
+ORIGINS_PID=$!
+wait_for_port "$TLS13_PORT"
+wait_for_port "$TLS12_PORT"
+
 PUB_JSON=$("$BINARY" generate x25519 --json)
 PRIVATE_KEY=$(printf '%s' "$PUB_JSON" | sed -n 's/.*"privateKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 PUBLIC_KEY=$(printf '%s' "$PUB_JSON" | sed -n 's/.*"publicKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -123,11 +145,14 @@ RRC_INTEROP_DROP=127.0.0.1:$DROP_PORT
 RRC_INTEROP_RST=127.0.0.1:$RST_PORT
 RRC_INTEROP_TRUNCATE=127.0.0.1:$TRUNCATE_PORT
 RRC_INTEROP_CLOSED=127.0.0.1:$CLOSED_PORT
+RRC_INTEROP_TLS13=127.0.0.1:$TLS13_PORT
+RRC_INTEROP_TLS12=127.0.0.1:$TLS12_PORT
+RRC_INTEROP_COVER_OPT=$COVER_OPT
 RRC_INTEROP_VERSION=$("$BINARY" --version | head -1 | tr -d '[:space:]')
 HANDOFF
 
 cleanup() {
-  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "$COVER_PID" 2>/dev/null || true
+  kill "${SERVER_PID:-}" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" "$COVER_PID" 2>/dev/null || true
   rm -f "$OUT_DIR/handoff.env"
 }
 trap cleanup EXIT INT TERM
@@ -136,7 +161,7 @@ echo "starting v2.0.1 entry on :$ENTRY_PORT with cover :$COVER_PORT and echo :$E
 if [[ "${INTEROP_CHECK_ONLY:-0}" == "1" ]]; then
   # Proves the generated configuration is one the server accepts, without
   # needing the cover to be dialled.
-  kill "$COVER_PID" "${ECHO_PID:-}" "${FAULT_PID:-}" 2>/dev/null || true
+  kill "$COVER_PID" "${ECHO_PID:-}" "${FAULT_PID:-}" "${ORIGINS_PID:-}" 2>/dev/null || true
   trap - EXIT
   "$BINARY" check --config "$OUT_DIR/server.json"
   exit $?
