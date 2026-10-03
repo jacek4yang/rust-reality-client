@@ -1427,7 +1427,7 @@ fn descriptors() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
         std::fs::read_dir("/proc/self/fd")
-            .map(|entries| entries.count())
+            .map(std::iter::Iterator::count)
             .ok()
     }
     #[cfg(not(target_os = "linux"))]
