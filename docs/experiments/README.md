@@ -221,3 +221,22 @@ upper bound: proxy buffering changes aggregation/scheduling and the Python TLS
 fixture can bottleneck. `--trace` is diagnostic-only and needs host ptrace
 permission. This cloud host denies PTRACE_TRACEME, so no syscall-profile result
 is claimed here.
+
+
+### Cursor optimization not adopted
+
+`bulk-profile-confirm.json.gz` records128 real TLS transfer trials (four arms,
+four repetitions, twoTLS versions, upload/download, one/four connections).
+`bulk-profile-aa.json.gz` uses the identical f12942e executable under both Rust
+labels: median throughput ratios still span0.913–1.131, exposing measurement
+noise. `bulk-profile-cursor-ablation.json.gz` repeats128 trials with the ReadBuf
+fix in both Rust arms and the cursor only in the candidate. Upload median ratios
+are0.865–0.938 while download ratios vary. All payload checks pass, but these
+results do not justify adopting the cursor. The recommended runtime retains the
+ReadBuf correctness fix and reverts the cursor; the patch is preserved as
+`partial-write-cursor-experimental.patch`. No negative observation is discarded.
+
+The isolated microbenchmark remains valid within its stated scope, but it does
+not establish useful end-to-end speedup. `bulk-profile-before.json.gz` is labeled
+exploratory (a short compile overlapped initial startup). The later trials freeze
+binaries and harness, with their exact background workload recorded in each file.

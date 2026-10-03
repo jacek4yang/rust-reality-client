@@ -52,3 +52,21 @@ the origin-only result is not a theoretical upper bound. Local strace cannot run
 because PTRACE_TRACEME is denied; no permission bypass was attempted. Do not use
 traced timings as throughput comparisons. Before adopting performance claims,
 freeze binaries/harness and repeat both bulk and interactive A/B without builds.
+
+
+## 20:41 UTC decision after actual bulk controls
+
+The cursor optimization is withdrawn from the recommended runtime. Its isolated
+microbenchmark improves short partial-write compaction, but four-round real
+transfer trials show negative upload differences; same-binary A/A also exposes
+large shared-host variation. This is insufficient evidence to trade production
+behavior for the optimization. Keep the exact experimental patch and all results.
+The dd7d0bc recovery soak was deliberately interrupted after this decision and
+must not be reported as a completed hour.
+
+The recommended candidate now keeps only the three ReadBuf regressions/fix on
+top of3068319. Previously built/pinned1.98.1 executable SHA-256:
+`e0a9d931913f8b4f060a14e4ed37b8b28d63cadd0c544a11091db757fe515a2e`.
+365 offline tests and Clippy had passed before the cursor experiment. A fresh
+recovery-enabled3600s Handoff soak started20:41 UTC. Final interactive A/B,
+pinned-server recheck, artifact build and exact final-commit CI remain due.
