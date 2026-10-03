@@ -116,3 +116,33 @@ passes directly, but times out through both tested clients and the fixed server.
 Pinned `src/server/vision.rs:1936-1951` buffers five bytes or awaits EOF before
 classifying the initial destination stream. TLS/WSS/SSE tests cannot certify
 arbitrary tiny raw-TCP request/response protocols against that server.
+
+## Final-runtime checks and aligned Xray policy
+
+`session-cost-ablation-final.json` and `hedge-ablation-final.json` repeat the
+mechanism trials on runtime commit `3068319`, binary
+`f12942e3fad2a9938a14c3739748021a908236eab2e897a4d2c461145d20a5f6`.
+The ablated controls are rebuilt from that same revision, changing one mechanism
+at a time. Both trial sets passed again; these are not reused pre-policy binaries.
+
+`additional-application-paths.json` records passed final-candidate IPv6-only,
+IPv4-only entry reached by `localhost`, and actual LINE→LANDING paths. The
+hostname test does not, by itself, prove a specific failed-IPv6 attempt order.
+The Handoff cases verify separate route evidence and the Rust client's Direct/
+Outer mode, because LANDING's relay log flag describes a different boundary.
+Stock Xray also passed the Handoff application workload.
+
+`timeout-control-confirmed.json` records the corrected green control job in
+[run 37146738972](https://github.com/jacek4yang/rust-reality-client/actions/runs/37146738972).
+All eight cases pass. The second writing-blackhole observation is 60.63 s, versus
+78.52 s in the first run: kernel scheduling/retransmission state matters, and the
+option is not an exact application deadline.
+
+A fair interpretation must separate policy defaults from implementation. Xray's
+[documented socket options](https://xtls.github.io/en/config/transports/sockopt.html)
+can also set keepalive idle/interval and TCP user timeout. The additional
+`xray-aligned-timers` CI job sets idle=30 s, interval=10 s and user timeout=60000 ms
+on both edges, and repeats transient/blackhole cases twice. It does not assume
+Xray will fail. Retry count remains Xray's setting; the explicit user timeout
+bounds the comparison. Until its result is recorded, this is an experiment plan,
+not a passed aligned-policy comparison.

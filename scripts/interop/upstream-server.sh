@@ -138,6 +138,19 @@ sed -e "s/PRIVATE_KEY/$PRIVATE_KEY/" \
 
 # Local CI needs no host-interface enumeration. WSL callers may opt in to a
 # reachable host address; a sandbox must not need hostname/ioctl permissions.
+# Optional address-family fixture, without changing host routes or interfaces.
+if [[ "${INTEROP_ENTRY_FAMILY:-both}" != "both" ]]; then
+  python3 - "$OUT_DIR/server.json" "$INTEROP_ENTRY_FAMILY" <<'PY_FAMILY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1]); config = json.loads(path.read_text())
+family = sys.argv[2]
+assert family in ('ipv4', 'ipv6')
+config['listeners'][0].update({'ip': family + 'Only', family: '127.0.0.1' if family == 'ipv4' else '::1'})
+path.write_text(json.dumps(config))
+PY_FAMILY
+fi
+
 # Optional real LINE -> LANDING path. Both processes use the exact same pinned
 # upstream binary, and all generated material stays inside the ignored fixture.
 if [[ "${INTEROP_HANDOFF:-0}" == "1" ]]; then

@@ -31,6 +31,7 @@ def main():
     records = []
     for name, (file, old, new) in variants.items():
         if args.only and name != args.only: continue
+        if name == 'with-user-timeout' and args.only != name: continue
         directory = args.output / name
         if directory.exists():
             raise SystemExit(f'refusing to overwrite prior experiment: {directory}')

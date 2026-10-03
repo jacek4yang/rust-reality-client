@@ -44,12 +44,18 @@ def main():
         config.write_text(json.dumps({'log':{'loglevel':'warning'},'inbounds':[{'listen':'127.0.0.1','port':port,'protocol':'socks','settings':{'auth':'noauth','udp':False}}],
         'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':node,'port':14443,'users':[{'id':values['RRC_INTEROP_USER_ID'],'encryption':'none','flow':'xtls-rprx-vision'}]}]},
         'streamSettings':{'network':'tcp','security':'reality','realitySettings':{'serverName':'localhost','fingerprint':'chrome','publicKey':values['RRC_INTEROP_PUBLIC_KEY'],'shortId':values['RRC_INTEROP_SHORT_ID']}}}]}))
+        if os.environ.get('XRAY_MATCHED_TIMERS') == '1':
+            data=json.loads(config.read_text())
+            timers={'tcpKeepAliveIdle':30,'tcpKeepAliveInterval':10,'tcpUserTimeout':60000}
+            data['outbounds'][0]['streamSettings']['sockopt']=timers
+            data['inbounds'][0]['streamSettings']={'sockopt':timers}
+            config.write_text(json.dumps(data))
         command=[str(a.binary),'run','-config',str(config)]
     else:
         config=a.output/'client.toml'
         config.write_text(f'''[listen]\nsocks5="127.0.0.1:{port}"\nhttp=""\n[[node]]\nname="isolated-node"\naddress="{node}"\nport=14443\nuserId="{values['RRC_INTEROP_USER_ID']}"\n[node.reality]\npublicKey="{values['RRC_INTEROP_PUBLIC_KEY']}"\nshortId="{values['RRC_INTEROP_SHORT_ID']}"\nserverName="localhost"\n''')
         command=[str(a.binary),'run','--config',str(config),'--log-level','debug']
-    result={'case':a.case,'implementation':a.implementation,'censored':False,'detected':False,'recovered':False,'restore_seconds':float(os.environ.get('RESTORE_SECONDS','5')) if a.case.endswith('transient') else None}
+    result={'xray_matched_timers':os.environ.get('XRAY_MATCHED_TIMERS')=='1','case':a.case,'implementation':a.implementation,'censored':False,'detected':False,'recovered':False,'restore_seconds':float(os.environ.get('RESTORE_SECONDS','5')) if a.case.endswith('transient') else None}
     with (a.output/'client.log').open('w') as log:
         process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT)
         try:

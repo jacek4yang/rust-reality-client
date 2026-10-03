@@ -180,6 +180,8 @@ def sample_process(pid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--node-address', choices=['127.0.0.1','::1','localhost'], default='127.0.0.1')
+    parser.add_argument('--entry-family', choices=['both','ipv4','ipv6'], default='both')
     parser.add_argument('--raw-probe-bytes', type=int, default=0, help='diagnostic tiny raw-TCP round trip before TLS workloads')
     parser.add_argument('--handoff', action='store_true', help='use isolated LINE and LANDING server processes')
     parser.add_argument('--quiet-client', action='store_true', help='warn-level client logs for like-for-like timing runs')
@@ -196,7 +198,7 @@ def main():
     processes, servers, logs = [], [], []
     stop = threading.Event()
     samples, latencies = [], []
-    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
+    result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "node_address": args.node_address, "entry_family": args.entry_family, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
               "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "workloads": {}, "limitations": ["no packet-loss/netem or real NAT impairment", "no production credentials or AI provider traffic"]}
@@ -206,29 +208,31 @@ def main():
         # one day; three days is not sufficient for a 72h test plus setup).
         env = dict(os.environ)
         env['INTEROP_HANDOFF'] = '1' if args.handoff else '0'
+        env['INTEROP_ENTRY_FAMILY'] = args.entry_family
         env['INTEROP_OUTPUT_DIR'] = str((args.output / 'fixture').resolve())
         env['INTEROP_TLS_DAYS'] = str(max(2, int(args.seconds // 86400) + 2))
         node = subprocess.Popen(['bash', str(ROOT / 'scripts/interop/upstream-server.sh')], cwd=ROOT, env=env, stdout=node_log, stderr=subprocess.STDOUT)
         processes.append(node)
         deadline = time.monotonic() + 60
+        entry_address = {'both':'0.0.0.0:14443','ipv4':'127.0.0.1:14443','ipv6':'[::1]:14443'}[args.entry_family]
         while True:
             if node.poll() is not None:
                 raise RuntimeError('isolated upstream failed; inspect node.log')
-            if '"address":"0.0.0.0:14443"' in (args.output / 'node.log').read_text():
+            if ('"address":"'+entry_address+'"') in (args.output / 'node.log').read_text():
                 break
             if time.monotonic() > deadline: raise TimeoutError('upstream startup')
             time.sleep(.1)
         values = dict(line.split('=', 1) for line in (args.output / 'fixture/handoff.env').read_text().splitlines())
         http_port, socks_port = free_port(), free_port()
         config = args.output / 'client.toml'
-        config.write_text(f'''[listen]\nsocks5 = "127.0.0.1:{socks_port}"\nhttp = "127.0.0.1:{http_port}"\n[[node]]\nname = "isolated-entry"\naddress = "127.0.0.1"\nport = 14443\nuserId = "{values['RRC_INTEROP_USER_ID']}"\n[node.reality]\npublicKey = "{values['RRC_INTEROP_PUBLIC_KEY']}"\nshortId = "{values['RRC_INTEROP_SHORT_ID']}"\nserverName = "localhost"\n''')
+        config.write_text(f'''[listen]\nsocks5 = "127.0.0.1:{socks_port}"\nhttp = "127.0.0.1:{http_port}"\n[[node]]\nname = "isolated-entry"\naddress = "{args.node_address}"\nport = 14443\nuserId = "{values['RRC_INTEROP_USER_ID']}"\n[node.reality]\npublicKey = "{values['RRC_INTEROP_PUBLIC_KEY']}"\nshortId = "{values['RRC_INTEROP_SHORT_ID']}"\nserverName = "localhost"\n''')
         client_log = open(args.output / 'client.log', 'w'); logs.append(client_log)
         if args.implementation == 'xray':
             config = args.output / 'xray.json'
             config.write_text(json.dumps({"log": {"loglevel": "warning"}, "inbounds": [
                 {"listen": "127.0.0.1", "port": socks_port, "protocol": "socks", "settings": {"auth": "noauth", "udp": False}},
                 {"listen": "127.0.0.1", "port": http_port, "protocol": "http", "settings": {}}
-            ], "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": 14443,
+            ], "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": args.node_address, "port": 14443,
                 "users": [{"id": values['RRC_INTEROP_USER_ID'], "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
                 "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
                     "serverName": "localhost", "fingerprint": "chrome", "publicKey": values['RRC_INTEROP_PUBLIC_KEY'], "shortId": values['RRC_INTEROP_SHORT_ID']}}}]}))

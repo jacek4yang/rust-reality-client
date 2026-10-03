@@ -141,3 +141,61 @@ jobs:
           name: pending-data-bound-evidence
           path: evidence-timeout/
           if-no-files-found: error
+  xray-aligned-timers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.98.1
+      - name: Build pinned server and verify official Xray
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          curl -fL --retry 2 https://github.com/XTLS/Xray-core/releases/download/v26.9.9/Xray-linux-64.zip -o "$RUNNER_TEMP/xray.zip"
+          echo "1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df  $RUNNER_TEMP/xray.zip" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/xray.zip" xray -d "$RUNNER_TEMP/xray"
+          chmod +x "$RUNNER_TEMP/xray/xray"
+      - name: Separate default-policy differences from implementation differences
+        run: |
+          set -euo pipefail
+          mkdir -p target/xray-aligned-results
+          for round in 1 2; do
+            for scenario in idle-transient write-transient idle-blackhole write-blackhole; do
+              sudo env XRAY_MATCHED_TIMERS=1 RESTORE_SECONDS=40 INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+                bash scripts/experiments/packet_faults.sh "$RUNNER_TEMP/xray/xray" xray \
+                "$PWD/target/xray-aligned-results/$round-$scenario" "$scenario"
+            done
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = {p.parent.name: json.loads(p.read_text()) for p in Path('target/xray-aligned-results').glob('*/result.json')}
+          assert len(rows) == 8
+          # Preserve every result before interpreting it. This experiment does
+          # not assume Xray is worse, better or equal once timers are aligned.
+          Path('target/xray-aligned-results/summary.json').write_text(json.dumps(rows, indent=2)+'\n')
+          print(json.dumps(rows, indent=2))
+          for name, result in rows.items():
+              if name.endswith('transient'):
+                  assert result['recovered'], (name, result)
+          PY
+      - name: Collect non-secret aligned-policy results
+        if: always()
+        run: |
+          mkdir -p evidence-xray-aligned
+          find target/xray-aligned-results -name result.json -exec sh -c 'cp "$1" "evidence-xray-aligned/$(basename "$(dirname "$1")").json"' sh {} \; 2>/dev/null || true
+          cp target/xray-aligned-results/summary.json evidence-xray-aligned/ 2>/dev/null || true
+          git rev-parse HEAD > evidence-xray-aligned/source-commit.txt
+          uname -a > evidence-xray-aligned/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: xray-aligned-policy-evidence
+          path: evidence-xray-aligned/
+          if-no-files-found: error
