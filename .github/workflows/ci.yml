@@ -6,6 +6,7 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 # A superseded push does not need its own answer, and two runs of the interop
 # job competing for the same ports is a worse failure than no answer.
@@ -204,12 +205,14 @@ jobs:
           TARGET: ${{ matrix.target }}
           NAME: ${{ matrix.name }}
         run: |
-          version="$(git describe --tags --always)"
+          version="v$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           bundle="rust-reality-client-${version}-${NAME}"
           staged="$RUNNER_TEMP/stage/$bundle"
           mkdir -p "$staged"
           cp "target/$TARGET/release/rust-reality-client" "$staged/"
           cp README.md LICENSE-MIT LICENSE-APACHE examples/client.toml "$staged/"
+          cp docs/OPERATIONS.md "$staged/OPERATIONS.md"
+          git rev-parse HEAD > "$staged/SOURCE_COMMIT"
           printf '%s\n' "$version" > "$staged/VERSION"
           # Sorted, zeroned ownership and `gzip -n` keep the archive a function
           # of its inputs: two builds of one commit should hash the same, which
@@ -227,7 +230,7 @@ jobs:
   checksums:
     name: SHA-256 for every artifact
     runs-on: ubuntu-24.04
-    needs: artifacts
+    needs: [artifacts, windows-artifact]
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -241,10 +244,14 @@ jobs:
         with:
           name: rust-reality-client-aarch64-gnu
           path: staged
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rust-reality-client-x86_64-windows
+          path: staged
       - name: Hash and verify
         run: |
           cd staged
-          sha256sum -- *.tar.gz > SHA256SUMS
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
           # The check is the artifact's usefulness: a sum nobody re-computes is
           # a line of text, not a way to tell a good download from a tampered one.
@@ -274,3 +281,92 @@ jobs:
           components: ""
       - name: MSRV
         run: cargo check --locked --all-targets
+
+  windows-artifact:
+    name: Windows standalone artifact
+    runs-on: windows-2025
+    needs: [lint, test, msrv, interop, windows, dependency-audit]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Build, check and package
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = "v" + $metadata.packages[0].version
+          $bundle = "rust-reality-client-$version-x86_64-windows"
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          Copy-Item target/release/rust-reality-client.exe,README.md,LICENSE-MIT,LICENSE-APACHE,examples/client.toml $bundle
+          Copy-Item docs/OPERATIONS.md "$bundle/OPERATIONS.md"
+          [IO.File]::WriteAllText("$PWD/$bundle/VERSION", "$version`n")
+          $commit = git rev-parse HEAD
+          [IO.File]::WriteAllText("$PWD/$bundle/SOURCE_COMMIT", "$commit`n")
+          & "$PWD/$bundle/rust-reality-client.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "packaged executable failed" }
+          & "$PWD/$bundle/rust-reality-client.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw "packaged help failed" }
+          Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rust-reality-client-x86_64-windows
+          path: rust-reality-client-*.zip
+          if-no-files-found: error
+
+  package-acceptance:
+    name: Test actual Linux packages under resource faults
+    runs-on: ubuntu-24.04
+    needs: [artifacts, windows-artifact]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.96.0
+          components: ""
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: rust-reality-client-*
+          path: packages
+          merge-multiple: true
+      - name: Prepare unmodified server and official application fixture library
+        run: |
+          git clone --quiet "$UPSTREAM_URL" "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach "$UPSTREAM_NODE"
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          python3 -m venv target/venv
+          target/venv/bin/pip install websockets==15.0.1
+      - name: Extract then execute each actual deliverable
+        run: |
+          set -euo pipefail
+          export INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality"
+          for name in x86_64-gnu x86_64-musl; do
+            archive=$(find packages -maxdepth 1 -name "*-$name.tar.gz")
+            test -n "$archive"
+            mkdir -p "target/package-$name"
+            tar -xzf "$archive" -C "target/package-$name" --strip-components=1
+            binary="$PWD/target/package-$name/rust-reality-client"
+            test "$(cat "target/package-$name/SOURCE_COMMIT")" = "$GITHUB_SHA"
+            "$binary" --version
+            target/venv/bin/python scripts/interop/resource_adversity.py --binary "$binary" --output "target/adversity-$name"
+            target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
+          done
+      - name: Collect only sanitized reports
+        if: always()
+        run: |
+          mkdir -p package-evidence
+          for p in target/adversity-*/report.json target/application-*/report.json; do
+            if test -f "$p"; then cp "$p" "package-evidence/$(basename "$(dirname "$p")").json"; fi
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: package-acceptance-evidence
+          path: package-evidence/
+          if-no-files-found: error

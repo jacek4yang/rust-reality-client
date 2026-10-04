@@ -14,6 +14,7 @@ This harness measures user-space backpressure and resets, NOT packet loss/NAT.
 from __future__ import annotations
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -202,11 +203,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     processes, servers, logs = [], [], []
     stop = threading.Event()
-    samples, latencies = [], []
+    samples, latencies, sample_errors = [], [], []
     result = {"requested_seconds": args.seconds, "origin_only_control": args.direct, "implementation": args.implementation, "handoff": args.handoff, "node_address": args.node_address, "with_recovery": args.with_recovery, "entry_family": args.entry_family, "quiet_seconds": args.quiet_seconds, "quiet_client": args.quiet_client, "passed": False, "websockets": "15.0.1",
               "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
               "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
               "workloads": {}, "limitations": ["no packet-loss/netem or real NAT impairment", "no production credentials or AI provider traffic"]}
+    result['started_utc'] = datetime.now(timezone.utc).isoformat()
+    result['source_commit'] = subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     try:
         node_log = open(args.output / 'node.log', 'w'); logs.append(node_log)
         # Fresh fixture certificates for long opt-in runs (the fixture default is
@@ -367,9 +371,30 @@ def main():
             return {'origin_resets': count, 'local_cancellations': count, 'explicit_reconnections': count * 2}
 
         def sample():
-            while not stop.is_set():
-                samples.append(sample_process(client.pid))
-                stop.wait(5)
+            # Preserve incremental, secret-free evidence if the execution host
+            # disappears. A progress record is never a completed-test verdict.
+            try:
+                with (args.output / 'samples.jsonl').open('w') as journal:
+                    while not stop.is_set():
+                        observation = sample_process(client.pid)
+                        samples.append(observation)
+                        journal.write(json.dumps(observation) + '\n')
+                        journal.flush()
+                        progress = {
+                            'status': 'running', 'passed': False,
+                            'started_utc': result['started_utc'],
+                            'source_commit': result['source_commit'],
+                            'binary_sha256': result['binary_sha256'],
+                            'requested_seconds': args.seconds,
+                            'elapsed_seconds': time.monotonic() - started,
+                            'sample': observation,
+                        }
+                        temporary = args.output / 'progress.tmp'
+                        temporary.write_text(json.dumps(progress, indent=2) + '\n')
+                        temporary.replace(args.output / 'progress.json')
+                        stop.wait(5)
+            except Exception as exc:
+                sample_errors.append(f'{type(exc).__name__}: {exc}')
 
         sampler = threading.Thread(target=sample, daemon=True); sampler.start()
         async def workloads():
@@ -416,6 +441,8 @@ def main():
         asyncio.run(workloads())
         result['wall_seconds'] = time.monotonic() - started
         stop.set(); sampler.join(10)
+        assert not sampler.is_alive(), 'resource sampler failed to stop'
+        assert not sample_errors, sample_errors
         time.sleep(1)
         result['after_drain'] = sample_process(client.pid)
         client.send_signal(signal.SIGINT); client.wait(15)
@@ -475,6 +502,7 @@ def main():
                 try: process.wait(15)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
         for log in logs: log.close()
+        result['finished_utc'] = datetime.now(timezone.utc).isoformat()
         (args.output / 'report.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps({"passed": result['passed'], "report": str(args.output / 'report.json')}), flush=True)
 
