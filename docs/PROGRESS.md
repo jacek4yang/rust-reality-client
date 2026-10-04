@@ -71,3 +71,22 @@ Publication is gated on the continuous run, matching runtime file hashes, exact
 version, all CI jobs, fresh packet faults and tests of packaged executables.
 The final workflow is main-only. Confirmation to merge PR #5/#7 and release
 preparation into main was requested in chat and is pending.
+
+### Infrastructure interruption (2026-10-04 10:35 UTC)
+
+The original 24-hour attempt lost its execution transport after the last sample
+at 14573.938 s. Recovery of exec session 72330 timed out; there is no final report
+or terminal exit receipt. This is NOT a completed endurance pass. The last
+snapshot had 8 active healthy workload streams, 27 FDs, 3268 KiB RSS and no
+panics; interrupted evidence is retained in `release-24h-interrupted.json`.
+The previously announced next-day completion estimate is withdrawn.
+
+Exact d2a6cce CI 37182730520 passed all 12 jobs, and packet run 37182344060 passed
+all three. Downloaded raw package/audit evidence is retained separately.
+
+A new GitHub-hosted five-hour GNU/musl package matrix provides a bounded run
+with persistent remote results, within GitHub's six-hour job limit. It does not
+satisfy the existing 24-hour release gate. The user was asked whether a clearly
+scoped five-hour release standard is acceptable, or whether a continuously
+available host must first complete 24 hours. That decision and merge approval
+are pending; do not silently lower the publication gate.
