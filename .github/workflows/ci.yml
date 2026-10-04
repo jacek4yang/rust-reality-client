@@ -45,6 +45,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           version: ${{ env.RUST }}
+      - name: Release gate rejection tests
+        run: python3 -m unittest discover -s scripts/release/tests -v
       - name: cargo fmt
         run: cargo fmt --check --all
       # `-D warnings` is the whole point: a pedantic lint this repository has
@@ -355,13 +357,14 @@ jobs:
             test "$(cat "target/package-$name/SOURCE_COMMIT")" = "$GITHUB_SHA"
             "$binary" --version
             target/venv/bin/python scripts/interop/resource_adversity.py --binary "$binary" --output "target/adversity-$name"
+            target/venv/bin/python scripts/interop/multi_entry_recovery.py --binary "$binary" --output "target/multi-entry-$name"
             target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
           done
       - name: Collect only sanitized reports
         if: always()
         run: |
           mkdir -p package-evidence
-          for p in target/adversity-*/report.json target/application-*/report.json; do
+          for p in target/adversity-*/report.json target/application-*/report.json target/multi-entry-*/report.json; do
             if test -f "$p"; then cp "$p" "package-evidence/$(basename "$(dirname "$p")").json"; fi
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
