@@ -18,6 +18,9 @@
 //! mystery.
 
 mod grammar;
+mod json;
+
+pub use json::{parse_json, to_json};
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -214,6 +217,18 @@ pub struct Config {
 ///
 /// Returns every problem found, as a [`ConfigError`].
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
+    if text.trim_start().starts_with('{') {
+        parse_json(text)
+    } else {
+        parse_toml(text)
+    }
+}
+
+/// Reads the legacy TOML format with the same strict validation.
+///
+/// # Errors
+/// Returns all configuration problems, without credential values.
+pub fn parse_toml(text: &str) -> Result<Config, ConfigError> {
     let document = match text.parse::<toml::Table>() {
         Ok(table) => table,
         Err(error) => {
@@ -655,3 +670,6 @@ fn reject_unknown(table: &toml::Table, allowed: &[&str], path: &str, problems: &
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod json_tests;

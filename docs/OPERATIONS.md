@@ -1,3 +1,7 @@
+> Configuration update (development): JSON is primary. See
+> [CONFIGURATION.md](CONFIGURATION.md). Existing TOML examples below remain
+> valid with an explicit `--config client.toml`. Published v0.1.0 is unchanged.
+
 # Operations
 
 Everything here is written against the binary as it ships: one executable, two

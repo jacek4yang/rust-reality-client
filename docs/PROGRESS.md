@@ -90,3 +90,21 @@ satisfy the existing 24-hour release gate. The user was asked whether a clearly
 scoped five-hour release standard is acceptable, or whether a continuously
 available host must first complete 24 hours. That decision and merge approval
 are pending; do not silently lower the publication gate.
+
+## JSON-first configuration change (2026-10-05)
+
+v0.1.0 was released at main `3cb7c5d` after the approved independent five-hour
+GNU/musl qualification. This new feature branch does not modify that release.
+
+- Primary JSON inbounds/outbounds schema, flat VLESS settings, REALITY publicKey
+  and strict supported transport values. Legacy TOML and explicit migration stay.
+- JSON duplicate keys, conflicting aliases, unknown/unsupported features, invalid
+  credentials, non-loopback opt-in and listener conflicts are tested fail-closed.
+- CLI defaults to client.json; only absent JSON permits legacy fallback. Migration
+  preserves credentials and refuses replacement, using mode 0600 on Unix.
+- Local strict Clippy and 386 offline/unit/CLI/doc regressions pass. The actual CLI
+  JSON application fixture covers both listener families, TLS 1.2/1.3 WSS/SSE,
+  injected failures, reconnects and resource drain. Exact final CI is pending.
+- Stable publication intentionally remains blocked by the v0.1.0 runtime manifest:
+  a new runtime/dependency set needs fresh matching qualification. No release,
+  merge, or five-hour evidence for this change is claimed.

@@ -1,0 +1,81 @@
+{
+  "passed": true,
+  "config_format": "json",
+  "requested_seconds": 120.0,
+  "wall_seconds": 120.44594525700086,
+  "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+  "binary_sha256": "a1c036f6ad162c3ae03789f38012424de2f25ddac80fa098d2441deb343ed9b9",
+  "workloads": {
+    "recovery": {
+      "origin_resets": 4,
+      "local_cancellations": 4,
+      "explicit_reconnections": 8
+    },
+    "wss-http-tls12": {
+      "messages": 20,
+      "wall_seconds": 119.98547808399962,
+      "close_code": 1000
+    },
+    "wss-http-tls13": {
+      "messages": 20,
+      "wall_seconds": 119.99724942100147,
+      "close_code": 1000
+    },
+    "wss-socks-tls12": {
+      "messages": 20,
+      "wall_seconds": 119.98093673699987,
+      "close_code": 1000
+    },
+    "wss-socks-tls13": {
+      "messages": 20,
+      "wall_seconds": 119.98994526899696,
+      "close_code": 1000
+    },
+    "sse-http-tls12": {
+      "events": 597
+    },
+    "sse-http-tls13": {
+      "events": 597
+    },
+    "sse-socks-tls12": {
+      "events": 598
+    },
+    "sse-socks-tls13": {
+      "events": 598
+    },
+    "churn": 234
+  },
+  "after_drain": {
+    "monotonic": 18322.881391263,
+    "rss_kib": 5064,
+    "fds": 11,
+    "threads": 10,
+    "cpu_seconds": 0.61
+  },
+  "node_termination": {
+    "terminal_visible": true,
+    "elapsed_seconds": 0.0011484930000733584,
+    "proxy_still_running": true
+  },
+  "limitations": [
+    "no packet-loss/netem or real NAT impairment",
+    "no production credentials or AI provider traffic"
+  ],
+  "purpose": "Development JSON CLI application regression, not stable-release endurance qualification",
+  "final_resources": {
+    "timestampUnixMs": 1791178434225,
+    "level": "debug",
+    "event": "resources",
+    "active": 0,
+    "trackedHighWater": 10,
+    "connectionsAvailable": 256,
+    "handshakesAvailable": 32,
+    "probesAvailable": 4,
+    "sparesAvailable": 16,
+    "accepted": 264,
+    "carried": 259,
+    "failed": 4,
+    "panicked": 0,
+    "cancelled": 0
+  }
+}
