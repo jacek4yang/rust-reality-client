@@ -5,12 +5,20 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tomllib
+
+from check_configuration_update import validate
 
 root = Path(__file__).resolve().parents[2]
 assert 'PENDING_ENDURANCE' not in (root / 'docs/RELEASE_NOTES.md').read_text(), 'release notes are still a draft'
 manifest = json.loads((root / 'docs/experiments/release-runtime.json').read_text())
 files = subprocess.check_output(['git', 'ls-files', '-z', 'src', 'Cargo.toml', 'Cargo.lock'], cwd=root).decode().split('\0')
 actual = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files if name}
+version = tomllib.loads((root/'Cargo.toml').read_text())['package']['version'] if (root/'Cargo.toml').exists() else None
+if version == '0.1.1':
+    validate(root, actual, manifest['files'])
+    sys.exit(0)
 assert actual == manifest['files'], 'runtime changed after the recorded endurance run'
 assert set(manifest['endurance_binaries']) == {'gnu', 'musl'}
 for platform, digest in manifest['endurance_binaries'].items():

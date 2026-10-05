@@ -1,4 +1,4 @@
-> Configuration update (development): JSON is primary. See
+> Configuration update (v0.1.1): JSON is primary. See
 > [CONFIGURATION.md](CONFIGURATION.md). Existing TOML examples below remain
 > valid with an explicit `--config client.toml`. Published v0.1.0 is unchanged.
 

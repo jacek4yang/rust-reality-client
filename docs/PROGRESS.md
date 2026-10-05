@@ -108,3 +108,13 @@ GNU/musl qualification. This new feature branch does not modify that release.
 - Stable publication intentionally remains blocked by the v0.1.0 runtime manifest:
   a new runtime/dependency set needs fresh matching qualification. No release,
   merge, or five-hour evidence for this change is claimed.
+
+## Authorized JSON maintenance release (2026-10-05)
+
+PR #9 merged into main at `93034af`. The user then explicitly requested the JSON
+change in the final downloadable release. v0.1.1 uses a clearly disclosed
+configuration-update qualification: unchanged transport/scheduler/protocol
+source, narrowly reviewed configuration/CLI changes and JSON dependency additions,
+fresh full CI plus actual package regressions. It does not reuse v0.1.0 binary
+hashes or claim a new five-hour run. Publication and artifact verification are
+pending at this preparation checkpoint.

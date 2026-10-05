@@ -1,4 +1,4 @@
-# rust-reality-client, client.toml
+# rust-reality-client, legacy client.toml (JSON is now primary)
 #
 # One file, two kinds of line: the ones the client reads, and the comments that
 # say what each value has to be. Nothing here is a default you should keep —
@@ -10,8 +10,9 @@
 #     rust-reality-client generate --out client.toml
 #
 # which writes this same file with a fresh user id, then paste the four REALITY
-# values from the server's own `reality` output. Do not hand-edit the user id:
-# `generate` draws one from the operating system's entropy source.
+# values from the server's own `reality` output. For an existing server, replace
+# the generated userId with the UUID that owns the supplied shortId. Generation
+# does not register the new UUID on the server.
 #
 # Field names follow the server, not an Xray share link. An Xray link's
 # `pbk`/`sni`/`sid`/`id`/`fp`/`flow` are refused by name with a pointer to the
