@@ -1,7 +1,8 @@
 # rust-reality-client v0.1.0
 
-PENDING_ENDURANCE: this draft must be replaced with verified final run results
-before the release gate will permit publication.
+Acceptance: two independent continuous five-hour Linux package runs completed
+on 2026-10-04. The maintainer approved this release standard on 2026-10-05.
+This is not a completed 24-hour endurance qualification.
 
 Native Rust VLESS + REALITY + Vision client for an unmodified rust-reality
 v2.0.1 server. SOCKS5 and HTTP CONNECT listen on loopback by default.
@@ -15,6 +16,34 @@ v2.0.1 server. SOCKS5 and HTTP CONNECT listen on loopback by default.
 - Correct Direct/framed ReadBuf handling and pipelined nested TLS.
 - Actual Linux package tests cover malformed inputs, incomplete request
   deadlines, admission pressure, descriptor exhaustion and bounded shutdown.
+
+## Completed acceptance
+
+[Five-hour workflow and original reports](https://github.com/jacek4yang/rust-reality-client/actions/runs/37196136866):
+
+| Measurement | Linux x86_64 GNU | Linux x86_64 musl |
+| --- | ---: | ---: |
+| Continuous workload seconds | 18000.166 | 18000.371 |
+| Short connections | 35,203 | 35,403 |
+| Long WSS / SSE streams | 4 / 4 | 4 / 4 |
+| WSS messages per stream | 2,740 | 2,740 |
+| SSE events per stream | 89,868 | 89,882 |
+| Injected origin resets / local cancellations | 600 / 600 | 600 / 600 |
+| Explicit reconnects | 1,200 | 1,200 |
+| Final active sessions / panics | 0 / 0 | 0 / 0 |
+| Initial / drained file descriptors | 11 / 11 | 11 / 11 |
+
+All four WSS streams closed normally. HTTP CONNECT and SOCKS5 were tested
+with nested TLS 1.2 and 1.3, using the pinned unmodified server. Resource
+permits returned in full. The 600 recorded failed sessions per platform are
+expected injected resets, not unexplained failures. Exact binary hashes,
+runtime source hashes and complete reports are committed under
+`docs/experiments/release-{runtime,5h-*}`. Release builds additionally rerun
+package smoke/adversity/recovery, interoperability and packet-fault gates.
+
+The earlier 24-hour attempt was interrupted by its execution environment
+after about four hours and has no final passing report; it is not combined
+with these runs or counted as a completed test.
 
 ## Downloads
 

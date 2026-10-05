@@ -41,5 +41,17 @@
     "src/transport/relay.rs": "36701a09c8496b493977c075c236f51109fc96a9ab92e07a06149aab88165a1d",
     "src/transport/session.rs": "9e8d392ef795333b657529c4406bcb146cd46898b588520ab777422698cfee8e",
     "src/transport/socket.rs": "8b6ca10b3409272c6b41f521ca70d52e4872e5c3bef70b8ec93810a180a486cc"
+  },
+  "endurance_binaries": {
+    "gnu": "25943d0e088c54d4f71f49107154cd9349669c1097d27e339c52b7f760995ed1",
+    "musl": "bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32"
+  },
+  "acceptance": {
+    "continuous_seconds_per_binary": 18000,
+    "approved_utc": "2026-10-05T03:04:51Z",
+    "workflow_run": 37196136866,
+    "harness_commit": "bc12c6bea72042dc9ad150347eea38d11ed7ddb1",
+    "package_source_commit": "d2a6cceb0318ae7ee069d5d7b852fd900e773087",
+    "scope": "Two independent continuous five-hour runs; not a 24-hour qualification."
   }
 }
