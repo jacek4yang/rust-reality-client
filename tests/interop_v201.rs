@@ -32,9 +32,10 @@ use rust_reality_client::protocol::reality::{
 use rust_reality_client::protocol::vless::Destination;
 use rust_reality_client::scheduler::{Policy, Scheduler};
 use rust_reality_client::transport::{
-    AddressFamily, Dial, DialPolicy, Downlink, Environment, Transferred, Tuning, VisionSession,
-    carry,
+    AddressFamily, Applied, Dial, DialPolicy, Downlink, Environment, KEEPALIVE_COUNT,
+    KEEPALIVE_INTERVAL, Transferred, Tuning, VisionSession, carry, configure, probe,
 };
+use socket2::SockRef;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -52,8 +53,10 @@ const DESTINATION_DELAY: Duration = Duration::from_secs(3);
 /// slack a measured wall clock is owed.
 const DESTINATION_FLOOR: Duration = DESTINATION_DELAY.saturating_sub(Duration::from_millis(250));
 /// The keepalive idle this client sets, and therefore the quiet an established
-/// tunnel has to outlast before it can be called stable.
-const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+/// tunnel has to outlast before it can be called stable. Spelled from the crate's
+/// own constant so this file cannot drift away from what the shipped sockets ask
+/// for: a test that hard-codes thirty seconds passes on a client that changed it.
+const KEEPALIVE_IDLE: Duration = rust_reality_client::transport::KEEPALIVE_IDLE;
 /// The whole burst the `truncate` destination sends before it resets.
 const DESTINATION_BURST: usize = 64 * 1024;
 /// Concurrent local connections the storm test opens through one live node.
@@ -158,9 +161,12 @@ async fn tunnel() -> (TcpStream, Handshake) {
     let mut stream = TcpStream::connect(&address)
         .await
         .unwrap_or_else(|error| panic!("connecting to {address}: {error}"));
-    stream
-        .set_nodelay(true)
-        .expect("nodelay on a local interop node");
+    // The client's own data-socket policy, called rather than re-typed here: a
+    // harness that tuned its tunnel differently from the production dial path
+    // would measure the harness, and an option the harness forgot would make any
+    // later claim about options surviving a crossing false in the same way for
+    // both the honest and the broken client.
+    configure(&stream).unwrap_or_else(|error| panic!("tuning the tunnel to {address}: {error}"));
     stream
         .write_all(&hello.record())
         .await
@@ -330,6 +336,74 @@ async fn a_vision_session_carries_bytes_both_ways_through_v201() {
     let _ = session.shutdown().await;
 }
 
+/// A session quiet past its own keepalive window still carries bytes.
+///
+/// The wait is real wall time on purpose. `relay`'s own test parks a relay for
+/// two hours on a mocked clock and can only show that *this client* arms no
+/// read-idle timer; whether the connection survives the window its socket option
+/// defines is a question about a kernel and a peer, so it is asked of a kernel and
+/// a peer. The pause is the whole detection window — 30 s of silence, then three
+/// probes ten seconds apart — plus five seconds of margin, which puts at least
+/// three probes each way on the wire before anything is asked of the tunnel.
+///
+/// This is the measurement that separates the two mechanisms the brief insists on
+/// keeping apart: an idle path that answers its probes is a live path, and the
+/// age of a connection is not evidence about it.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server and costs ~65 seconds"]
+async fn a_session_quiet_past_its_keepalive_window_still_carries_bytes() {
+    let mut session = session_to_echo().await;
+
+    let before = b"before the quiet\n";
+    session.write_all(before).await.expect("first write");
+    let mut answered = vec![0_u8; before.len()];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut answered))
+        .await
+        .expect("the echo answers before the quiet")
+        .expect("read the first reply");
+    assert_eq!(
+        answered, before,
+        "the session was working when it went quiet"
+    );
+
+    let window = KEEPALIVE_IDLE + KEEPALIVE_INTERVAL * KEEPALIVE_COUNT + Duration::from_secs(5);
+    let started = Instant::now();
+    tokio::time::sleep(window).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= window,
+        "the quiet has to be real time, not a mocked clock: it lasted {elapsed:?}"
+    );
+
+    let after = b"after the quiet\n";
+    session
+        .write_all(after)
+        .await
+        .expect("write after the quiet");
+    let mut still = vec![0_u8; after.len()];
+    tokio::time::timeout(READ_TIMEOUT, session.read_exact(&mut still))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the tunnel went silent for {elapsed:?} and never answered again; \
+                 a keepalive window is meant to detect a dead peer, not to end a \
+                 quiet one"
+            )
+        })
+        .expect("read the reply after the quiet");
+    assert_eq!(
+        still, after,
+        "a session that stayed quiet for {elapsed:?} must still carry bytes"
+    );
+    if let Some(error) = session.failure() {
+        panic!(
+            "the quiet cost this session something: {error}\n\
+             it was idle for {elapsed:?} against a {window:?} detection window"
+        );
+    }
+    let _ = session.shutdown().await;
+}
+
 /// Half-closing the uplink reaches the destination, and its EOF ends the tunnel.
 ///
 /// The client seals an authenticated `close_notify` and nothing else
@@ -483,15 +557,37 @@ fn report_field(report: &str, key: &str) -> u64 {
         .unwrap_or_else(|error| panic!("{prefix} = {line:?} is not a number: {error}"))
 }
 
+/// What one nested handshake leaves behind, for the assertions to read.
+///
+/// Six separate things are being claimed about one crossing, and a tuple of six
+/// positional values would make each claim's subject a matter of counting.
+struct Crossing {
+    /// Which transport state the downlink ended in: framed, outer-sealed, or raw.
+    downlink: Downlink,
+    /// The first failure the session latched, if any.
+    failure: Option<Error>,
+    /// What the production relay moved, per direction.
+    counts: Transferred,
+    /// The nested peer's own report, which is the verdict that matters.
+    report: String,
+    /// The tunnel socket's options, read back *before* the session took it.
+    options_at_establishment: Applied,
+    /// The same socket's options, read back *after* the crossing.
+    options: Applied,
+}
+
 /// Carries one genuine nested TLS handshake through a live session and a live
 /// node, and reports the shape the session's downlink ended up in.
 ///
 /// The relay here is [`carry`], the same function the SOCKS5 and HTTP paths run,
 /// so nothing about the transition is observed through a test-only reader.
-async fn nested_tls_handshake(
-    origin: &str,
-    expect_version: &str,
-) -> (Downlink, Option<Error>, Transferred, String) {
+///
+/// The socket options are read twice off a second handle on the same socket,
+/// taken before the session owns it: a Vision transition changes what the client
+/// does with the socket, and if it ever replaced the socket to do it, the tuned
+/// `TCP_NODELAY` and the armed probes would go with the old handle and the second
+/// read would say so.
+async fn nested_tls_handshake(origin: &str, expect_version: &str) -> Crossing {
     let (destination, port) = target(origin);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -502,6 +598,11 @@ async fn nested_tls_handshake(
     let driver = tls_driver(address, expect_version);
 
     let (stream, handshake) = tunnel().await;
+    let held = SockRef::from(&stream)
+        .try_clone()
+        .expect("a second handle on the tunnel socket");
+    let options_at_establishment = probe(&held)
+        .unwrap_or_else(|error| panic!("probe the tunnel socket as it is handed over: {error}"));
     let mut session = tokio::time::timeout(
         READ_TIMEOUT,
         VisionSession::connect(stream, handshake, user_id(), &destination, port),
@@ -544,7 +645,53 @@ async fn nested_tls_handshake(
         "the nested handshake must succeed, and it is the claim this test makes.\n\
          the session latched: {latched}\nthe driver said:\n{report}"
     );
-    (session.downlink(), session.failure(), counts, report)
+    let options = probe(&held).unwrap_or_else(|error| panic!("probe the tunnel socket: {error}"));
+    Crossing {
+        downlink: session.downlink(),
+        failure: session.failure(),
+        counts,
+        report,
+        options_at_establishment,
+        options,
+    }
+}
+
+/// The socket options every crossing must still show, whoever changed the mode.
+///
+/// Both transitions are handovers of the same five-tuple: the framing stops, or
+/// the sealing stops, and in neither case is a new socket created. So the window
+/// the dial layer armed is either still there or the transition replaced it, and
+/// a session that quietly lost its probes would keep working right up until the
+/// day it needed them.
+///
+/// The same read taken *before* the crossing is asserted too, and it is what makes
+/// the claim above a claim rather than a tautology: without it, a tunnel that was
+/// never tuned would fail nothing here, and the difference between "the client
+/// arms keepalive and the transition keeps it" and "nobody ever armed it" would
+/// fall out of the test instead of being measured.
+fn assert_still_tuned(crossing: &Crossing, mode: &str) {
+    assert!(
+        crossing.options_at_establishment.keepalive && crossing.options_at_establishment.nodelay,
+        "{mode}: the tunnel was never tuned, so the after-crossing reading says nothing \
+         about the transition: {:?}",
+        crossing.options_at_establishment
+    );
+    assert!(
+        crossing.options.nodelay,
+        "{mode}: the tunnel lost TCP_NODELAY at some point in the crossing: {:?}",
+        crossing.options
+    );
+    assert!(
+        crossing.options.keepalive,
+        "{mode}: the tunnel lost its keepalive backstop at some point in the \
+         crossing: {:?}",
+        crossing.options
+    );
+    assert_eq!(
+        crossing.options.retries,
+        Some(KEEPALIVE_COUNT),
+        "{mode}: the probe count on the tunnel is not the one this process ships"
+    );
 }
 
 /// A TLS 1.3 destination: the node stops framing *and* stops sealing.
@@ -562,36 +709,37 @@ async fn nested_tls_handshake(
 #[tokio::test]
 #[ignore = "requires a live rust-reality v2.0.1 server and its TLS origins"]
 async fn a_tls_1_3_destination_ends_framing_and_the_record_layer_too() {
-    let (downlink, failure, counts, report) =
-        nested_tls_handshake("RRC_INTEROP_TLS13", "TLSv1.3").await;
+    let crossing = nested_tls_handshake("RRC_INTEROP_TLS13", "TLSv1.3").await;
+    let report = crossing.report.as_str();
 
     assert!(
-        report_field(&report, "leaf") > 16 * 1024,
+        report_field(&crossing.report, "leaf") > 16 * 1024,
         "the fixture leaf must exceed one TLS record, or the boundary would not \
          fall inside the handshake and this would prove much less:\n{report}"
     );
     assert_eq!(
-        downlink,
+        crossing.downlink,
         Downlink::Direct,
         "the session must have stopped opening records, not merely stopped framing:\n{report}"
     );
     assert_eq!(
-        report_field(&report, "bytes"),
+        report_field(&crossing.report, "bytes"),
         64 * 1024,
         "and bytes kept flowing after the boundary, in the mode the transition left:\n{report}"
     );
     assert!(
-        counts.to_local > 64 * 1024,
+        crossing.counts.to_local > 64 * 1024,
         "the flight and the body both came back down the tunnel, got {}",
-        counts.to_local
+        crossing.counts.to_local
     );
     assert!(
-        counts.to_remote > 0,
+        crossing.counts.to_remote > 0,
         "and the client's own records reached the origin"
     );
-    if let Some(error) = failure {
+    if let Some(error) = &crossing.failure {
         panic!("a handshake that completed is not a session failure: {error}");
     }
+    assert_still_tuned(&crossing, "Direct");
 }
 
 /// A TLS 1.2 destination: framing ends, the record layer does not.
@@ -606,27 +754,28 @@ async fn a_tls_1_3_destination_ends_framing_and_the_record_layer_too() {
 #[tokio::test]
 #[ignore = "requires a live rust-reality v2.0.1 server and its TLS origins"]
 async fn a_tls_1_2_destination_ends_framing_but_keeps_the_record_layer() {
-    let (downlink, failure, counts, report) =
-        nested_tls_handshake("RRC_INTEROP_TLS12", "TLSv1.2").await;
+    let crossing = nested_tls_handshake("RRC_INTEROP_TLS12", "TLSv1.2").await;
+    let report = crossing.report.as_str();
 
     assert_eq!(
-        downlink,
+        crossing.downlink,
         Downlink::Outer,
         "a TLS 1.2 origin must leave the outer record layer standing:\n{report}"
     );
     assert_eq!(
-        report_field(&report, "bytes"),
+        report_field(&crossing.report, "bytes"),
         64 * 1024,
         "and the framed-then-outer path must carry the whole body:\n{report}"
     );
     assert!(
-        counts.to_local > 64 * 1024,
+        crossing.counts.to_local > 64 * 1024,
         "the flight and the body both came back down the tunnel, got {}",
-        counts.to_local
+        crossing.counts.to_local
     );
-    if let Some(error) = failure {
+    if let Some(error) = &crossing.failure {
         panic!("a handshake that completed is not a session failure: {error}");
     }
+    assert_still_tuned(&crossing, "Outer");
 }
 
 /// The live node, read through the client's own configuration validator.

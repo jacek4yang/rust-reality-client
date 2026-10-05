@@ -30,6 +30,7 @@ use super::{
     Tuning, bounded,
 };
 use crate::transport::family::DialPolicy;
+use crate::transport::socket::{KEEPALIVE_COUNT, probe};
 
 /// Long enough that a hanging candidate can only leave the race by being
 /// cancelled, never by answering.
@@ -563,10 +564,22 @@ async fn the_winner_leaves_with_the_socket_options_armed() {
     assert_eq!(dialed.value.peer_addr().expect("peer address"), address);
     // A fresh socket's `TCP_NODELAY` is off on every platform this client ships
     // on, so reading it back true is proof that `connect_to` tuned the winner
-    // rather than handing the race result straight over. The keepalive half of
-    // the same call is proven in `socket`'s tests, because Windows can set
-    // keepalive but cannot read it back.
-    assert!(dialed.value.nodelay().expect("TCP_NODELAY read"));
+    // rather than handing the race result straight over. The keepalive half is
+    // read back here too: `SO_KEEPALIVE` and `TCP_KEEPCNT` answer on Windows as
+    // well as on Linux, and only the idle and the interval have no Windows
+    // spelling, which `socket`'s own test pins per platform.
+    let applied = probe(&dialed.value).expect("read the winning socket back");
+    assert!(applied.nodelay, "the winner is the tuned socket");
+    assert!(
+        applied.keepalive,
+        "the winner has the keepalive backstop armed, which is what makes a peer \
+         that dies without a FIN observable on the tunnel"
+    );
+    assert_eq!(
+        applied.retries,
+        Some(KEEPALIVE_COUNT),
+        "and the window it carries is the one this process ships"
+    );
     assert!(
         dial.environment()
             .recent_latency(AddressFamily::Ipv4, dial.tuning())

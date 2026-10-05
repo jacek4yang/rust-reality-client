@@ -38,7 +38,7 @@ use crate::handoff::Handoff;
 use crate::inbound::{Gate, http, socks5};
 use crate::logging::{Level, Logger};
 use crate::scheduler::Scheduler;
-use crate::transport::{Dial, DialPolicy, Environment, Tuning};
+use crate::transport::{Dial, DialPolicy, Environment, Tuning, socket};
 
 /// How long a connection may take to wind down after a stop was requested.
 ///
@@ -513,6 +513,11 @@ impl Service {
 
     /// Hands one accepted socket to a task, or turns it away on the spot.
     ///
+    /// Two things turn a socket away: no room in the tracked table, and a kernel
+    /// that will not take the data-socket options. Both are charged the same way,
+    /// because both are this edge settling a connection by itself without ever
+    /// asking a node about it.
+    ///
     /// The capacity that is checked is the tasks this process is *tracking now*, and a
     /// socket turned away here never becomes a task at all: it is charged to
     /// [`Report::refused`] and to no other counter, which keeps the terminal counters a
@@ -540,9 +545,30 @@ impl Service {
                 .emit();
             return;
         }
-        // A proxy that adds a Nagle round trip to every small request looks like a
-        // broken network, and the relay's cost is per-chunk copies either way.
-        let _ = stream.set_nodelay(true);
+        // Both halves of a proxied connection get the same two options the node
+        // puts on both of its own: `configure_accepted` applies `TCP_NODELAY` plus
+        // the keepalive backstop to an accepted stream (v2.0.1
+        // `src/transport/tcp.rs:339-374`, whose own test reads `SO_KEEPALIVE` back
+        // and asserts "accepted streams must arm keepalive"). `TCP_NODELAY`
+        // because an interactive message must not wait for a coalescing window,
+        // and the probes because a peer that died without a FIN is invisible on
+        // the local half exactly as it is on the tunnel.
+        //
+        // A socket whose options cannot be set is turned away rather than kept and
+        // hoped for. Upstream's contract for the same failure is that it "affects
+        // only this connection: the caller closes the stream, releases its permit,
+        // and keeps accepting", and a refusal the edge settled by itself is what
+        // [`Report::refused`] counts.
+        if let Err(error) = socket::configure(&stream) {
+            bump(&self.stats.refused);
+            self.logger
+                .event_at(Level::Warn, "refused")
+                .text("inbound", kind.label())
+                .text("reason", "the socket options were refused")
+                .text("detail", &error.to_string())
+                .emit();
+            return;
+        }
         self.logger
             .event_at(Level::Debug, "accepted")
             .text("inbound", kind.label())
@@ -1175,6 +1201,84 @@ shortId = "01"
         drop(listener);
         drop(accepted);
         (stream, peer)
+    }
+
+    /// Admission arms the local socket the way the dial layer arms the tunnel,
+    /// and the accepted half is the one nobody ever inspects.
+    ///
+    /// v2.0.1 puts `TCP_NODELAY` and the keepalive backstop on both of its sockets
+    /// and reads `SO_KEEPALIVE` back off the accepted one (`src/transport/tcp.rs:339-374`,
+    /// "accepted streams must arm keepalive"). This client used to call
+    /// `set_nodelay` here and discard the result, so the local half had no probes
+    /// at all and a refusal from the kernel would have gone uncounted.
+    ///
+    /// The clone is the whole trick: it is a second handle on the same socket,
+    /// which is the only way a test can ask a kernel what a socket the proxy owns
+    /// is holding. Options set on one handle are the other handle's state, because
+    /// there is one socket.
+    #[tokio::test]
+    async fn admission_arms_the_local_socket_too() {
+        let config =
+            parse(&one_node(free_port().await)).expect("one node on a port nobody listens on");
+        let (logger, lines) = capture();
+        let service = Service::new(&config, logger);
+        let mut connections = JoinSet::new();
+
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("an ephemeral loopback port");
+        let address = listener
+            .local_addr()
+            .expect("a bound listener knows its address");
+        let client = TcpStream::connect(address).await.expect("connect");
+        let (accepted, peer) = listener.accept().await.expect("accept");
+        // A second handle on the same socket: `dup` on Unix, `WSADuplicateSocketW`
+        // on Windows, and either way the options belong to the connection rather
+        // than to the handle, so reading them off the clone reads the proxy's own
+        // socket. `accepted` moves into `admit` below, and this keeps a window.
+        let held = socket2::SockRef::from(&accepted)
+            .try_clone()
+            .expect("a second handle on the same socket");
+        drop(listener);
+
+        service.admit(&mut connections, Kind::Socks5, accepted, peer);
+
+        let applied = socket::probe(&held).expect("read the local socket back");
+        assert!(
+            applied.nodelay,
+            "admission set TCP_NODELAY on the local half"
+        );
+        assert!(
+            applied.keepalive,
+            "admission armed the keepalive backstop on the local half"
+        );
+        assert_eq!(
+            applied.retries,
+            Some(socket::KEEPALIVE_COUNT),
+            "and the probe count is the one this process ships"
+        );
+
+        // The socket is still an ordinary admission: counted, tracked, and served.
+        let report = service.stats.report();
+        assert_eq!(report.accepted, 1, "one socket arrived");
+        assert_eq!(report.refused, 0, "and none of it was turned away");
+        assert_eq!(report.active, 1, "the task holds one tracked slot");
+
+        // Hang up, so the handler reaches its terminal counter on EOF rather than
+        // waiting out the first-byte budget.
+        drop(client);
+        while connections.join_next().await.is_some() {}
+        let drained = service.stats.report();
+        assert_eq!(drained.active, 0, "and gives it back when the task ends");
+        assert_eq!(
+            drained.accepted,
+            drained.carried + drained.refused + drained.failed + drained.unresolved,
+            "the counters reconcile: {drained:?}"
+        );
+        assert!(
+            lines.taken().iter().any(|line| line.contains("accepted")),
+            "the admission is visible in the log"
+        );
     }
 
     /// The tracked ceiling limits the tasks that are *alive*, not the connections

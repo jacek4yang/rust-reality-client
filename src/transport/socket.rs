@@ -97,6 +97,71 @@ pub fn configure<S: SocketHandle>(stream: &S) -> io::Result<()> {
     ))
 }
 
+/// What a live socket reports back about the options [`configure`] asked for.
+///
+/// Calling `setsockopt` and knowing the kernel holds the value are different
+/// claims, and only the second one is worth a sentence in an operations
+/// document: a platform that silently ignores `TCP_KEEPCNT`, or a handle that
+/// was replaced since the call, both leave a connection whose probes arrive on a
+/// schedule nobody chose. The three window fields are `None` where the platform
+/// has no way to answer at all — `TCP_KEEPIDLE` and `TCP_KEEPINTVL` are not
+/// Windows options — so the absence is recorded rather than guessed at.
+///
+/// Nothing in the relay calls this. It is the read-back the tests and the
+/// operator-facing diagnostics use, and it costs two or four `getsockopt` calls
+/// per socket, once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Applied {
+    /// `TCP_NODELAY`.
+    pub nodelay: bool,
+    /// `SO_KEEPALIVE`, which is what makes the window below reachable at all.
+    pub keepalive: bool,
+    /// Silence before the first probe, where the platform exposes it.
+    pub idle: Option<Duration>,
+    /// Gap between unanswered probes, where the platform exposes it.
+    pub interval: Option<Duration>,
+    /// Unanswered probes before the kernel gives up, where the platform exposes
+    /// it.
+    pub retries: Option<u32>,
+}
+
+/// Reads the options back off a live socket.
+///
+/// # Errors
+///
+/// Returns the OS error from `getsockopt` on `TCP_NODELAY` or `SO_KEEPALIVE`,
+/// which on a live TCP handle means the socket is gone. A platform that has no
+/// spelling for one of the three window values is not an error; it is a `None`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::net::TcpStream;
+///
+/// use rust_reality_client::transport::socket::{Applied, configure, probe};
+///
+/// let stream = TcpStream::connect("127.0.0.1:80").expect("a socket to ask");
+/// configure(&stream)?;
+/// let applied: Applied = probe(&stream)?;
+/// assert!(applied.nodelay && applied.keepalive);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn probe<S: SocketHandle>(stream: &S) -> io::Result<Applied> {
+    let socket = SockRef::from(stream);
+    let mut applied = Applied {
+        nodelay: socket.tcp_nodelay()?,
+        keepalive: socket.keepalive()?,
+        ..Applied::default()
+    };
+    #[cfg(unix)]
+    {
+        applied.idle = socket.tcp_keepalive_time().ok();
+        applied.interval = socket.tcp_keepalive_interval().ok();
+    }
+    applied.retries = socket.tcp_keepalive_retries().ok();
+    Ok(applied)
+}
+
 /// Builds the keepalive request from the three knobs, clamped to what a kernel
 /// can represent.
 fn keepalive(idle: Duration, interval: Duration, count: u32) -> TcpKeepalive {
@@ -165,6 +230,81 @@ mod tests {
         configure(&client).expect("a live TCP socket accepts nodelay and keepalive");
         configure(&server).expect("the same options on the accepted half");
         assert!(client.nodelay().expect("readable"), "nodelay set");
+    }
+
+    /// The kernel holds the window it was asked for, and says so when read back.
+    ///
+    /// Both halves of a real loopback connection are probed, because the option
+    /// that matters for a long-lived session is the one on the socket nobody is
+    /// watching: the accepted half, whose peer is an application that may simply
+    /// stop existing. What each platform can answer is a fact about the platform,
+    /// so each is pinned here by what this host actually returned rather than by
+    /// what the man page for the other one says.
+    #[test]
+    fn the_window_reads_back_off_both_halves_of_a_live_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("local address");
+        let client = TcpStream::connect(address).expect("connect to the test listener");
+        let (server, _) = listener.accept().expect("accept");
+
+        for (which, stream) in [("dialed", &client), ("accepted", &server)] {
+            configure(stream).unwrap_or_else(|error| panic!("configure the {which} half: {error}"));
+            let applied =
+                probe(stream).unwrap_or_else(|error| panic!("probe the {which} half: {error}"));
+            assert!(applied.nodelay, "{which}: TCP_NODELAY reads back on");
+            assert!(applied.keepalive, "{which}: SO_KEEPALIVE reads back on");
+            assert_eq!(
+                applied.retries,
+                Some(KEEPALIVE_COUNT),
+                "{which}: TCP_KEEPCNT reads back as the count we asked for"
+            );
+            #[cfg(unix)]
+            {
+                assert_eq!(
+                    applied.idle,
+                    Some(KEEPALIVE_IDLE),
+                    "{which}: TCP_KEEPIDLE reads back as the idle we asked for"
+                );
+                assert_eq!(
+                    applied.interval,
+                    Some(KEEPALIVE_INTERVAL),
+                    "{which}: TCP_KEEPINTVL reads back as the interval we asked for"
+                );
+            }
+            #[cfg(windows)]
+            {
+                // Windows has no `getsockopt` spelling for either one; the values
+                // were set through `SIO_TCP_SET` and stay unread. An option that
+                // becomes readable here would mean this test is now lying about
+                // what the platform refuses to say, so the absence is asserted.
+                assert_eq!(applied.idle, None, "{which}: no idle read-back exists here");
+                assert_eq!(
+                    applied.interval, None,
+                    "{which}: no interval read-back exists here"
+                );
+            }
+        }
+    }
+
+    /// A socket that was never configured says so, and a configured one changes
+    /// the answer.
+    ///
+    /// The negative half is what makes the positive half a measurement: without
+    /// it, an always-`true` read-back would look identical to a working
+    /// `setsockopt`.
+    #[test]
+    fn an_unconfigured_socket_reads_back_as_unconfigured() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("local address");
+        let client = TcpStream::connect(address).expect("connect to the test listener");
+        let (server, _) = listener.accept().expect("accept");
+
+        let before = probe(&client).expect("probe before configuring");
+        assert!(!before.keepalive, "a fresh socket has no probes armed");
+        configure(&client).expect("configure");
+        let after = probe(&client).expect("probe after configuring");
+        assert!(after.keepalive && after.nodelay, "and now it does");
+        drop(server);
     }
 
     /// The dial layer holds a Tokio stream, which is a different type over the

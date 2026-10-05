@@ -14,6 +14,7 @@ not a suggestion, and the file that defines it is named.
 * [systemd](#systemd)
 * [Triage: why did this connection fail](#triage-why-did-this-connection-fail)
 * [Tuning a node list that misbehaves](#tuning-a-node-list-that-misbehaves)
+* [Long-lived connections and socket policy](#long-lived-connections-and-socket-policy)
 * [Measuring a build: interop and soak](#measuring-a-build-interop-and-soak)
 * [Upgrading and rolling back](#upgrading-and-rolling-back)
 * [Application proxy settings](#application-proxy-settings)
@@ -170,6 +171,11 @@ more stable connection — they get a different failure. The names and values, a
 If one of these genuinely needs to change for your network, change it in the source and
 rebuild; the value you wrote in a file would have told you nothing about what it cost.
 
+Two absences are also deliberate and are argued with measurements rather than in the
+abstract: no socket in this client sets `TCP_USER_TIMEOUT`, and there is no read-idle
+deadline for an authenticated session. See
+[Long-lived connections and socket policy](#long-lived-connections-and-socket-policy).
+
 ## Logs
 
 One JSON object per line to standard error. `--log-level` (`-L`) is `error`, `warn`,
@@ -262,7 +268,7 @@ who it is about. The families are the ones in a `failed` line's `family` field:
 | `timeout` | the node's pace | `FIRST_BYTE_BUDGET` is 15 s; look at whether the destination was slow rather than the tunnel |
 | `handshake` | REALITY parameters | `publicKey`, `shortId`, `serverName`, and the clock — all four are answered by a silent relay to the cover, which is why they look alike |
 | `rejected` | the node's user list | the user id exists on that server, and its `shortIds` entry matches |
-| `idle` | the path, after the fact | a kernel probe found no answer; check NAT timeout and keepalive against your own network, not this client's defaults |
+| `idle` | the path, after the fact | a kernel probe found no answer about 60 s after the last byte moved — see [Long-lived connections and socket policy](#long-lived-connections-and-socket-policy). Check NAT timeout and keepalive against your own network, not this client's defaults |
 
 Three facts that make this shorter than it looks:
 
@@ -298,6 +304,163 @@ Symptoms and what they mean, in terms of the behaviour actually implemented:
   to 30 s, and a tripped node is owed one probe 250 ms before its window ends. Wait one
   window. A node tripped by a credentials refusal is *never* probed, because a probe
   cannot test a user id — that one needs the config fixed and a restart.
+
+## Long-lived connections and socket policy
+
+The workload this client is built for is not a page load. An agent session is a
+few hundred bytes out, then eleven minutes of the model thinking, then a long
+stream back that arrives a few kilobytes at a time. Two of those three states look
+exactly like a dead connection to anything that measures silence, so the
+mechanisms that answer "is this still working" are kept apart deliberately.
+
+### Four mechanisms, and only one of them is this client's
+
+| | The question it answers | Where | The bound |
+| --- | --- | --- | --- |
+| **A** | Did *setup* take too long — resolution, the dial race, REALITY authentication, the VLESS request and response? | `DNS_BUDGET`, `CONNECT_BUDGET` (`src/transport/dial.rs:45`, `:53`), `FIRST_BYTE_BUDGET` (`src/handoff.rs:78`) | 5 s, 10 s, 15 s. Finite, on purpose: an unanswered setup question gains nothing from being asked longer. |
+| **B** | Is a socket still alive — the node's or the application's? | the kernel, armed by `configure` on both halves (`src/transport/socket.rs:90`) | 30 s of quiet, then 3 probes 10 s apart — about 60 s, and 59.1 s measured. Retransmission of unacknowledged data is the system's own `tcp_retries2` budget, which this client neither reads nor writes. |
+| **C** | Is a *write* stuck? | nothing: `carry` arms no timer (`src/transport/relay.rs`) | The buffer is fixed at 8 KiB per direction and the loop cannot pull the next chunk until the current one is accepted, so a stuck writer stops reading rather than queueing. The wait ends when the kernel's own retransmission budget ends — a tabled `tcp_retries2` of 15 is 13 to 30 minutes. |
+| **D** | Is the *request* going well? | the application | Outside this proxy. A provider's own request deadline, its WebSocket Ping/Pong policy and its SSE keep-alive comments are the application's business; this client carries those bytes and does not manufacture them. |
+
+What is *not* in the table is the point of the section: there is no per-direction
+read-idle timeout, no maximum session age, and no lifetime cap on an established
+tunnel. Quiet is not broken. A connection that has been up for six hours is not
+more likely to be failing than one that opened a minute ago, and no code path here
+treats those two states differently.
+
+### "Applied" means the kernel said so
+
+`configure` is a `setsockopt`; `probe` is the `getsockopt` that reads the answer
+back (`src/transport/socket.rs:90`, `:149`). Tests and claims use the read-back,
+not the call. The platform asymmetry is recorded instead of smoothed over: Linux
+answers `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`, Windows has no spelling
+for the first two, so an `Applied` off a Windows socket legitimately says
+`idle=unread;interval=unread`. That is a fact about the API, not a setting that
+failed — and `an_unconfigured_socket_reads_back_as_unconfigured` is what stops the
+read-back from passing by coincidence, while
+`the_window_reads_back_off_both_halves_of_a_live_connection` pins the pair on both
+ends of a real connection and
+`the_winner_leaves_with_the_socket_options_armed` pins the socket that *won* an
+address race rather than the candidates that lost it.
+
+The options also survive a Vision transition, because a transition is a change of
+state on the same socket rather than a new socket. That is asserted, not assumed:
+`tests/interop_v201.rs` reads the options off the tunnel *before* the session takes
+it and again *after* a complete nested-TLS crossing, and requires the pair to be
+equal and non-default. The before-crossing read is what makes the claim a claim —
+without it, a tunnel that was never tuned in the first place would fail nothing.
+
+### Measured: outage tolerance and blackhole detection are different numbers
+
+Both were measured on one private point-to-point path in two network namespaces,
+with `tc netem` dropping every packet in both directions (one direction alone would
+leave the peer free to answer a probe with an RST, which is a different experiment).
+Nothing outside the two namespaces is touched: no sysctl, no route, no firewall
+rule, no interface on the host.
+
+```sh
+cargo build --locked --example keepalive_window
+# needs root for `ip netns` and `tc`; RUN_SECONDS is the per-run hang guard
+scripts/interop/keepalive_window.sh target/debug/examples/keepalive_window 240
+```
+
+The script reads the armed window out of the `src/transport/socket.rs` of the
+checkout it lives in, so the schedule the runs below were measured against is the
+shipped policy and not a private copy of it. When the binary under test was built
+from a different tree — a WSL build copy, a release unpacked elsewhere — set
+`RRC_SOCKET_SOURCE` to that tree's `src/transport/socket.rs`: without it the script
+refuses to start rather than check a schedule against source the binary never
+compiled.
+
+The six runs, on Linux 6.6 with the shipped 30/10/3 window armed on both sockets:
+
+| Run | What happened | Result |
+| --- | --- | --- |
+| `blackhole-park` | path down at +2 s, one parked read, never healed | `ETIMEDOUT` on both ends 59.1 s after the path went down |
+| `outage-20s-one-probe-lost` | down 15–35 s, so the probe at +30 s was lost; read at +45 s | **alive** — the session was still usable |
+| `outage-40s-three-probes-lost` | down 15–55 s, covering all three probe slots at 30, 40 and 50 s | the far end's kernel gave up at 60.98 s and the client's next write returned `ETIMEDOUT` on arrival at +70 s — **the session was dead even though the path had healed at 55 s** |
+| `stalled-peer-acceptance` | 64 KiB pushed at a peer that had stopped reading for 8 s | accepted in **0 ms**, delivered **7994 ms** later, byte-identical |
+| `stalled-peer-backpressure` | 1 MiB to the same peer | the write **stalled 7980 ms**, then everything arrived; the client's own buffer never grew |
+| `outage-during-bulk` | 5 s outage *while* 1 MiB was in flight | the write cost 6515 ms and the transfer **completed** — retransmission, not keepalive, is what protected it |
+
+Read those four ways:
+
+* **Idle-blackhole detection is ~60 s, and it is the armed window, not a userspace
+  timer.** The 59.1 s is 30 + 3 × 10 minus scheduling, and no timer exists in the
+  relay to produce it. If you need a dead path noticed faster than that, the answer
+  is the application's own heartbeat (mechanism D), not a shorter keepalive: the
+  `outage-20s` and `outage-during-bulk` runs are connections a shorter window would
+  have killed for no reason.
+* **Outage tolerance is decided by which probe slots the outage covers, not by its
+  length.** A 20 s blackout that swallowed one probe was survived; a 40 s blackout
+  that covered all three was not, *even though the path came back*. That is the
+  honest limit of this design and it is a property of the 30/10/3 window that
+  v2.0.1 also uses: a session quiet through an outage that covers three consecutive
+  probe slots is not rescued by anything in this client. A session that is
+  *carrying* bytes is a different case — see `outage-during-bulk`.
+* **Acceptance into a kernel send buffer is not delivery.** 64 KiB was "written" in
+  0 ms and reached the peer eight seconds later. `write_all` returning means the
+  local kernel holds the bytes; nothing in this stack reads that as a peer having
+  seen them, and neither should you.
+* **Backpressure is tolerated without an unbounded buffer.** The 1 MiB run is the
+  evidence: the writer parked, the queue grew in the kernel's socket buffers and
+  not in user space, and the payload arrived unchanged.
+
+### `TCP_USER_TIMEOUT`: not armed, and not a read timeout
+
+Per `tcp(7)`, the option bounds "the maximum amount of time in milliseconds that
+transmitted data may remain unacknowledged, or buffered data may remain
+untransmitted (due to zero window size) before TCP will forcibly close the
+connection". The same page states three things that decide this:
+
+* "Increasing user timeouts allows a TCP connection to survive extended periods
+  without end-to-end connectivity" — i.e. a *long* value buys tolerance.
+* "when used with the `TCP keepalive` option, `TCP_USER_TIMEOUT` will override
+  keepalive to determine when to close a connection due to keepalive failure."
+* "The option has no effect on when TCP retransmits a packet, nor when a keepalive
+  probe is sent."
+
+So it is *not* a generic application read-idle timeout, and the common claim that
+arming it necessarily kills healthy quiet streams is wrong: it can only fire when
+data is unacknowledged or untransmitted, and a quiet connection with an empty send
+queue has neither. It is also not free — on a socket with a pending write, a short
+`TCP_USER_TIMEOUT` replaces the ~60 s keepalive verdict above with a faster one,
+which is exactly the trade the `blackhole-park` and `outage-20s` runs measure.
+Lowering it to make a failure test finish sooner would buy a quicker red and a
+worse client.
+
+Decision: **unchanged and unarmed.** No socket in this project sets
+`TCP_USER_TIMEOUT`, no system default is modified, no congestion control is
+touched, and there is no configuration key for it. If it is ever armed it should be
+per socket, with the same six runs on both sides of the change.
+
+### What a keepalive answer is evidence *of*
+
+The probes are answered by the node's TCP stack. A successful probe therefore
+proves that this client and `LINE` still have a path and a socket — nothing about
+whether `LANDING` is up, and nothing about whether the AI service behind it will
+accept the next request. End-to-end health is only ever demonstrated by the
+application's own bytes moving: the request that got a response, the WebSocket Ping
+that got a Pong. Those pass through here unopened and unchanged (see
+[Long connections](ACCEPTANCE.md) in the acceptance list), and this client never
+injects one of its own to make a dead session look alive.
+
+### The hot path's fixed cost
+
+* 8 KiB per direction (`RELAY_BUFFER`, `src/transport/relay.rs:57`), allocated once
+  per connection by the copy loop and reused for every chunk. A relay holds 16 KiB
+  regardless of how much it moves.
+* A Vision session holds four buffers, each `Vec::with_capacity` at construction
+  (`src/transport/session.rs:253-257`); the three `resize` calls in the same file
+  only ever grow within that capacity.
+* No allocation in the Vision codec's production path, no logging in
+  `relay.rs`/`session.rs`/`vision.rs`, and no timer armed per chunk. These are
+  grep-checkable rather than aspirational:
+  `grep -n "logger\|log::\|tracing" src/transport/relay.rs src/transport/session.rs src/protocol/vision.rs`
+  returns nothing.
+* One task per connection on the shared multi-thread runtime, so a busy stream
+  occupies a worker for a chunk rather than for a session, and there is no second
+  runtime, queue or thread pool in front of it.
 
 ## Measuring a build: interop and soak
 
@@ -341,10 +504,11 @@ above, run on Linux against the pinned `v2.0.1` binary at the default 50 ms paci
 (`target/interop-linux.log`):
 
 ```text
-SOAK 120.097172739s: 1063 connections, 32953 bytes down, p50 60.804906ms p95 64.80683ms
-  p99 68.64482ms (fastest 58.553713ms, slowest 76.725247ms), hedged 0 won 0,
-  long-lived session still up, primary primary with 1063 successes and 0 failures
-SOAK footprint: descriptors 13 -> 13, resident 7864 KiB -> 7992 KiB, threads 2 -> 2
+SOAK 120.035904576s: 1074 connections, 33294 bytes down, p50 60.518341ms
+  p95 63.541121ms p99 68.651451ms (fastest 56.452721ms, slowest 73.693634ms),
+  hedged 0 won 0, long-lived session still up, primary primary with 1074 successes
+  and 0 failures
+SOAK footprint: descriptors 13 -> 13, resident 8044 KiB -> 8172 KiB, threads 2 -> 2
 ```
 
 * **percentiles** are nearest-rank over every SOCKS5 setup round trip in the window —
@@ -363,7 +527,7 @@ SOAK footprint: descriptors 13 -> 13, resident 7864 KiB -> 7992 KiB, threads 2 -
   failover, not a hedge paying off.
 * **descriptors** are read from `/proc/self/fd` before and after, and the test asserts a
   bound (`DESCRIPTOR_SLACK` = 16): a connection that never closed leaves a socket behind
-  and would blow past it within a few dozen connections. 1063 connections returning the
+  and would blow past it within a few dozen connections. 1074 connections returning the
   count to exactly itself is the point. `resident` and `threads` are printed, not
   asserted — allocator retention and the runtime's blocking pool both grow to a plateau
   and a bounded assertion on them would be a flaky test, not a leak check. Here the
