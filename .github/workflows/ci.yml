@@ -356,6 +356,8 @@ jobs:
             binary="$PWD/target/package-$name/rust-reality-client"
             test "$(cat "target/package-$name/SOURCE_COMMIT")" = "$GITHUB_SHA"
             "$binary" --version
+            expected=$(python3 -c 'import json,sys; print(json.load(open("docs/experiments/release-runtime.json"))["endurance_binaries"][sys.argv[1].removeprefix("x86_64-")])' "$name")
+            echo "$expected  $binary" | sha256sum --check --strict
             target/venv/bin/python scripts/interop/resource_adversity.py --binary "$binary" --output "target/adversity-$name"
             target/venv/bin/python scripts/interop/multi_entry_recovery.py --binary "$binary" --output "target/multi-entry-$name"
             target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
