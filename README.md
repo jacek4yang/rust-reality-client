@@ -148,8 +148,8 @@ Raspberry Pi OS of current vintage, the `aarch64-gnu` artifact is the one to use
 
 ## 5. Configuration
 
-**JSON is the primary format in this development branch. Published v0.1.0 uses
-TOML; these changes do not replace or relabel that release or its endurance evidence.**
+**JSON is the primary format starting with v0.1.1. v0.1.0 uses TOML. Legacy
+TOML remains supported; old release files and endurance evidence are unchanged.**
 
 ```bash
 rust-reality-client generate --out client.json

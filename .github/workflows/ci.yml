@@ -349,6 +349,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/toolchain
         with:
           version: 1.96.0
@@ -369,6 +371,9 @@ jobs:
         run: |
           set -euo pipefail
           export INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality"
+          if test "$GITHUB_WORKFLOW" = 'Verified stable release'; then
+            python3 scripts/release/check_evidence.py
+          fi
           for name in x86_64-gnu x86_64-musl; do
             archive=$(find packages -maxdepth 1 -name "*-$name.tar.gz")
             test -n "$archive"
@@ -379,13 +384,13 @@ jobs:
             "$binary" --version
             # Only stable publication claims the committed endurance qualification.
             # Development packages still run all faults, but must not inherit old evidence.
-            if test "$GITHUB_WORKFLOW" = 'Verified stable release'; then
+            if test "$GITHUB_WORKFLOW" = 'Verified stable release' && test "$(cat "target/package-$name/VERSION")" = v0.1.0; then
               expected=$(python3 -c 'import json,sys; print(json.load(open("docs/experiments/release-runtime.json"))["endurance_binaries"][sys.argv[1].removeprefix("x86_64-")])' "$name")
               echo "$expected  $binary" | sha256sum --check --strict
             fi
             target/venv/bin/python scripts/interop/resource_adversity.py --binary "$binary" --output "target/adversity-$name"
             target/venv/bin/python scripts/interop/multi_entry_recovery.py --binary "$binary" --output "target/multi-entry-$name"
-            target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
+            target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --config-format json --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
           done
       - name: Collect only sanitized reports
         if: always()

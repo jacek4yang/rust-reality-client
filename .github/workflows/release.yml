@@ -17,7 +17,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Enforce main, exact version and completed endurance evidence
+        with:
+          fetch-depth: 0
+      - name: Enforce main, exact version and the declared release qualification
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |

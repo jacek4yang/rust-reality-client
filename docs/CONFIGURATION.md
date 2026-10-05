@@ -1,7 +1,7 @@
 # JSON configuration for rust-reality-client
 
-JSON is the primary configuration format for this change. The already-published
-v0.1.0 remains TOML-based; use a build containing this change before migrating.
+JSON is the primary configuration format starting with v0.1.1. The older
+v0.1.0 remains TOML-based; install v0.1.1 or newer before migrating.
 This is an Xray-style **subset**, tuned for the unmodified rust-reality v2.0.1
 server, not a promise that arbitrary Xray files can run unchanged.
 
@@ -141,7 +141,8 @@ not repeated in JSON diagnostics.
 - [Xray first-outbound behavior](https://xtls.github.io/en/config/outbound.html)
 - [rust-reality supported scope](https://github.com/jacek4yang/rust-reality#supported-scope)
 
-This change preserves transport/session code. Nevertheless, changing runtime
-source and dependencies invalidates the old v0.1.0 endurance qualification.
-The stable-release gate must reject publication until matching new evidence is
-recorded; short JSON interoperability tests are not a substitute for five hours.
+This release preserves transport/session code. The v0.1.1 configuration-update
+gate binds the exact new source, limits changes to configuration/CLI plus the
+JSON dependency set, and requires fresh CI, live interoperability and actual
+package fault/application tests. It does not claim the new binaries completed
+five hours: that qualification belongs only to the unchanged v0.1.0 assets.

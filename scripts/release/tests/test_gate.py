@@ -21,6 +21,7 @@ class ReleaseGate(unittest.TestCase):
         (self.root/'docs/experiments').mkdir(parents=True)
         (self.root/'src').mkdir()
         shutil.copyfile(GATE, self.root/'scripts/release/check_evidence.py')
+        shutil.copyfile(GATE.parent/'check_configuration_update.py', self.root/'scripts/release/check_configuration_update.py')
         (self.root/'src/lib.rs').write_text('// synthetic fixture\n')
         subprocess.run(['git','init','-q',str(self.root)],check=True)
         subprocess.run(['git','-C',str(self.root),'add','src/lib.rs'],check=True)
