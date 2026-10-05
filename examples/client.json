@@ -1,0 +1,43 @@
+{
+  "allowRemote": false,
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "http-in",
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "home-entry",
+      "protocol": "vless",
+      "settings": {
+        "address": "www.example.com",
+        "port": 443,
+        "id": "00000000-0000-4000-8000-000000000000",
+        "encryption": "none",
+        "flow": "xtls-rprx-vision"
+      },
+      "streamSettings": {
+        "method": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "shortId": "abcd",
+          "serverName": "www.example.com"
+        }
+      }
+    }
+  ]
+}

@@ -192,6 +192,7 @@ def main():
     parser.add_argument('--quiet-seconds', type=float, default=65)
     parser.add_argument('--implementation', choices=['rust-current', 'rust-baseline', 'xray'], default='rust-current')
     parser.add_argument('--direct', action='store_true', help='diagnostic origin-only control; not proxy acceptance')
+    parser.add_argument('--config-format', choices=['toml', 'json'], default='toml', help='Rust client input format; Xray always uses its own JSON schema')
     parser.add_argument('--seconds', type=float, default=3600)
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/rust-reality-client')
     parser.add_argument('--output', type=Path, default=ROOT / 'target/application-soak')
@@ -235,6 +236,21 @@ def main():
         http_port, socks_port = free_port(), free_port()
         config = args.output / 'client.toml'
         config.write_text(f'''[listen]\nsocks5 = "127.0.0.1:{socks_port}"\nhttp = "127.0.0.1:{http_port}"\n[[node]]\nname = "isolated-entry"\naddress = "{args.node_address}"\nport = 14443\nuserId = "{values['RRC_INTEROP_USER_ID']}"\n[node.reality]\npublicKey = "{values['RRC_INTEROP_PUBLIC_KEY']}"\nshortId = "{values['RRC_INTEROP_SHORT_ID']}"\nserverName = "localhost"\n''')
+        if args.config_format == 'json' and args.implementation != 'xray':
+            config = args.output / 'client.json'
+            config.write_text(json.dumps({
+                "inbounds": [
+                    {"listen": "127.0.0.1", "port": socks_port, "protocol": "socks", "settings": {"auth": "noauth", "udp": False}},
+                    {"listen": "127.0.0.1", "port": http_port, "protocol": "http"}
+                ],
+                "outbounds": [{"tag": "isolated-entry", "protocol": "vless", "settings": {
+                    "address": args.node_address, "port": 14443, "id": values['RRC_INTEROP_USER_ID'],
+                    "encryption": "none", "flow": "xtls-rprx-vision"
+                }, "streamSettings": {"method": "raw", "security": "reality", "realitySettings": {
+                    "serverName": "localhost", "publicKey": values['RRC_INTEROP_PUBLIC_KEY'], "shortId": values['RRC_INTEROP_SHORT_ID']
+                }}}]
+            }))
+        result['config_format'] = 'xray-json' if args.implementation == 'xray' else args.config_format
         client_log = open(args.output / 'client.log', 'w'); logs.append(client_log)
         if args.implementation == 'xray':
             config = args.output / 'xray.json'

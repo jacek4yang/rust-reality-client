@@ -149,6 +149,27 @@ jobs:
           export RRC_SOAK_SECONDS=30
           cargo test --locked --test interop_v201 -- --ignored --test-threads=1
 
+      - name: Exercise JSON through the actual CLI and TLS applications
+        run: |
+          cargo build --release --locked
+          python3 -m venv target/json-venv
+          target/json-venv/bin/pip install websockets==15.0.1
+          INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+            target/json-venv/bin/python scripts/interop/application_soak.py \
+            --config-format json --seconds 120 --handoff --with-recovery --terminate-node \
+            --output target/json-application > "$RUNNER_TEMP/json-application.log" 2>&1
+      - name: JSON application summary
+        if: always()
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          path = Path('target/json-application/report.json')
+          if path.exists():
+              report = json.loads(path.read_text())
+              print(json.dumps({k:report[k] for k in ('passed','config_format','workloads','after_drain')},indent=2))
+          PYCODE
+
       - name: Node log
         if: failure()
         run: cat "$RUNNER_TEMP/node.log" || true
@@ -212,7 +233,7 @@ jobs:
           staged="$RUNNER_TEMP/stage/$bundle"
           mkdir -p "$staged"
           cp "target/$TARGET/release/rust-reality-client" "$staged/"
-          cp README.md LICENSE-MIT LICENSE-APACHE examples/client.toml "$staged/"
+          cp README.md LICENSE-MIT LICENSE-APACHE examples/client.toml examples/client.json "$staged/"
           cp docs/OPERATIONS.md "$staged/OPERATIONS.md"
           git rev-parse HEAD > "$staged/SOURCE_COMMIT"
           printf '%s\n' "$version" > "$staged/VERSION"
@@ -305,7 +326,7 @@ jobs:
           $version = "v" + $metadata.packages[0].version
           $bundle = "rust-reality-client-$version-x86_64-windows"
           New-Item -ItemType Directory -Path $bundle | Out-Null
-          Copy-Item target/release/rust-reality-client.exe,README.md,LICENSE-MIT,LICENSE-APACHE,examples/client.toml $bundle
+          Copy-Item target/release/rust-reality-client.exe,README.md,LICENSE-MIT,LICENSE-APACHE,examples/client.toml,examples/client.json $bundle
           Copy-Item docs/OPERATIONS.md "$bundle/OPERATIONS.md"
           [IO.File]::WriteAllText("$PWD/$bundle/VERSION", "$version`n")
           $commit = git rev-parse HEAD
@@ -356,8 +377,12 @@ jobs:
             binary="$PWD/target/package-$name/rust-reality-client"
             test "$(cat "target/package-$name/SOURCE_COMMIT")" = "$GITHUB_SHA"
             "$binary" --version
-            expected=$(python3 -c 'import json,sys; print(json.load(open("docs/experiments/release-runtime.json"))["endurance_binaries"][sys.argv[1].removeprefix("x86_64-")])' "$name")
-            echo "$expected  $binary" | sha256sum --check --strict
+            # Only stable publication claims the committed endurance qualification.
+            # Development packages still run all faults, but must not inherit old evidence.
+            if test "$GITHUB_WORKFLOW" = 'Verified stable release'; then
+              expected=$(python3 -c 'import json,sys; print(json.load(open("docs/experiments/release-runtime.json"))["endurance_binaries"][sys.argv[1].removeprefix("x86_64-")])' "$name")
+              echo "$expected  $binary" | sha256sum --check --strict
+            fi
             target/venv/bin/python scripts/interop/resource_adversity.py --binary "$binary" --output "target/adversity-$name"
             target/venv/bin/python scripts/interop/multi_entry_recovery.py --binary "$binary" --output "target/multi-entry-$name"
             target/venv/bin/python scripts/interop/application_soak.py --binary "$binary" --seconds 120 --handoff --with-recovery --terminate-node --output "target/application-$name"
