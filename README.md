@@ -14,8 +14,8 @@ rust-reality-client doctor --config client.toml  # is it reachable, and who is a
 rust-reality-client run    --config client.toml  # SOCKS5 127.0.0.1:10808, HTTP 127.0.0.1:10809
 ```
 
-No Xray process, no Go runtime, no shared library: one static-ish binary and one
-TOML file. The server is not modified, configured differently, or restarted.
+No Xray process or Go runtime: one native executable and one TOML file.
+The Linux musl artifact is static; GNU artifacts require the platform C runtime. The server is not modified, configured differently, or restarted.
 
 ---
 
@@ -408,20 +408,21 @@ the node's own 120 s write-stall bound (`src/io_activity.rs:14` upstream), so th
 client learns a peer is gone from its own socket rather than losing that race, and a
 test asserts both the arithmetic and the inequality.
 
-Tolerance is a separate number and it is not a duration. An outage that swallowed one
+The earlier keepalive-only measurements below are historical. Tolerance also depends
+on outage timing and peer policy. An outage that swallowed one
 probe slot was survived; an outage that covered all three slots killed the session
 **even after connectivity returned**, because both ends had already been told the
 socket was dead. A socket that is *carrying* bytes is not subject to that at all — a
 5 s outage in the middle of a 1 MiB write cost 6.5 s and the transfer completed on
-retransmission alone. Deliberately absent:
+retransmission alone. Current policy:
 
-* **No `TCP_USER_TIMEOUT`.** This is not because it endangers quiet connections:
-  per `tcp(7)` it bounds data left unacknowledged or untransmitted behind a zero
-  window, so a quiet socket with an empty send queue cannot trigger it. It is
-  because on a socket that *does* have a pending write it "will override keepalive",
-  which would replace the 59 s verdict above with a shorter one — and two of the six
-  measured runs are connections that trade would have broken. Unarmed, and no global
-  default touched.
+* **A 60 s per-socket `TCP_USER_TIMEOUT` on Linux/Android.** Actual packet-loss
+  experiments exposed the gap in keepalive-only handling when data is outstanding.
+  The Linux control detected an idle blackhole in 60.99 s and a writing blackhole
+  in 78.52 s, while 5/20/40 s transient outages recovered with byte-exact payloads.
+  This is a kernel pending-data bound, not an application read-idle deadline or
+  an exact sixty-second wall-clock promise. Windows retains keepalive; this
+  pending-data bound is not claimed there. See [experiment evidence](docs/experiments/README.md).
 * **No userspace read-idle timeout for healthy authenticated connections.** A quiet
   tunnel is a working tunnel. An idle SSE stream is left alone for as long as it
   stays quiet, and only the kernel probes decide whether it is alive.
@@ -436,6 +437,23 @@ without cutting the reverse direction, and the node's `close_notify` reads as en
 stream rather than as an error. A WebSocket `Ping`, `Pong` or `Close` is payload to
 this proxy — carried byte for byte, never generated on the application's behalf, and
 never taken as proof that the service behind the node is healthy.
+
+### Established-session feedback
+
+The scheduler also receives one terminal observation per adopted session. Writer
+acceptance counts survive errors and cancellation; they do not prove delivery.
+Logs keep node index, family, setup/session age, direction/operation and cause,
+without application content or credentials. Cancellation, local shutdown, normal
+EOF and ambiguous remote resets do not become entry-node convictions.
+
+Three tunnel-read protocol defects within five minutes add a bounded 500 ms
+selection cost for thirty seconds. This never bans a route or affects a live
+stream. Costs remain family-specific; a recently successful alternate family
+is not charged. Unknown completion is not proof that an alternate family works.
+A healthy bidirectional session lasting thirty seconds can clear its family's
+cost; a handshake probe cannot. Late pre-recovery observations cannot re-poison
+that recovery. This is not a detector of encrypted HTTP errors, provider rate
+limits, or a cure for shared LANDING failures.
 
 ## 14. Diagnostics
 
@@ -636,14 +654,18 @@ Out of scope for v1, deliberately, and not "not yet":
 
 Known rough edges worth naming:
 
-* A session that stays **quiet** through an outage covering all three probe slots —
-  about 40 s of the armed 30/10/3 window — is lost even when the path heals inside a
-  minute, because both ends' kernels have already been told the socket is dead
-  (section 13). A session that is *carrying* bytes does not have that failure: the
-  same length outage during a bulk write cost 6.5 s and the transfer completed.
-  Raising the tolerance means raising `KEEPALIVE_COUNT` or `_INTERVAL`, which slows
-  blackhole detection by the same amount, and that trade is measured rather than
-  guessed at.
+* The pinned v2.0.1 server waits for five destination bytes (or EOF) when
+  classifying the first downlink. A three-byte raw echo response on a connection
+  that stays open stalls through both this client and stock Xray, but succeeds
+  without the proxy. This server limitation is not fixed by changing clients;
+  TLS/WSS/SSE acceptance does not establish arbitrary tiny raw-TCP behavior.
+
+* Outage tolerance depends on timing, pending data, peer policy and the kernel.
+  The current Linux tests recover from the tested 5/20/40-second outages; that
+  does not guarantee recovery from every outage of the same length. Once either
+  peer closes a socket, the application must open a new connection. The earlier
+  keepalive-only probe-slot experiment is retained as historical evidence in
+  Operations, not as a prediction of the updated pending-data policy.
 * One `userId` per node, because that is what the file shape describes.
 * `doctor` cannot distinguish clock skew from a wrong key or short id on a failed
   handshake — it says so rather than guessing (section 14).

@@ -1,0 +1,100 @@
+[
+  {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 5,
+    "elapsed_seconds": 5.012691743000005,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 5,
+    "elapsed_seconds": 6.500024494999991,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 20,
+    "elapsed_seconds": 20.045810027000016,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 20,
+    "elapsed_seconds": 26.735589232999985,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 40,
+    "elapsed_seconds": 40.09052191000001,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 40,
+    "elapsed_seconds": 52.449965921,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  {
+    "case": "idle-blackhole",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": true,
+    "recovered": false,
+    "restore_seconds": null,
+    "terminal": "EOF",
+    "elapsed_seconds": 60.985324381,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  {
+    "case": "write-blackhole",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": true,
+    "recovered": false,
+    "restore_seconds": null,
+    "terminal": "EOF",
+    "elapsed_seconds": 78.51855132999998,
+    "bytes_received": 0,
+    "writer_observation": [
+      "ConnectionResetError"
+    ]
+  }
+]

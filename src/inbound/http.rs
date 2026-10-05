@@ -57,7 +57,8 @@ use crate::error::{
 use crate::handoff::{Established, FIRST_BYTE_BUDGET};
 use crate::inbound::{Establish, Gate};
 use crate::protocol::vless::Destination;
-use crate::transport::{Transferred, carry, verdict};
+use crate::transport::relay::carry_observed;
+use crate::transport::{Transferred, verdict};
 
 /// Status: the tunnel is open, and the bytes after this line are the tunnel's.
 pub const OK: u16 = 200;
@@ -515,7 +516,12 @@ impl<E: Establish> Proxy<E> {
 
         match established {
             Err(error) => self.fail(&mut reader, version, error).await,
-            Ok(Established { mut session, .. }) => {
+            Ok(Established {
+                mut session,
+                mut completion,
+                ..
+            }) => {
+                completion.begin();
                 // This answer is the last free choice in the exchange. From here the
                 // session belongs to one node and one socket, so a stalled or reset
                 // transfer is reported to the client as an ended connection rather than
@@ -527,9 +533,26 @@ impl<E: Establish> Proxy<E> {
                     // taken back.
                     return Outcome::refused(&refusal);
                 }
-                match carry(&mut reader, &mut session).await {
-                    Ok(transferred) => Outcome::Carried(transferred),
-                    Err(error) => Outcome::Failed(verdict(session.failure(), error)),
+                match carry_observed(&mut reader, &mut session, &mut completion.progress).await {
+                    Ok(transferred) => {
+                        completion.downlink = match session.downlink() {
+                            crate::transport::Downlink::Framed => "framed",
+                            crate::transport::Downlink::Outer => "outer",
+                            crate::transport::Downlink::Direct => "direct",
+                        };
+                        completion.finish(None);
+                        Outcome::Carried(transferred)
+                    }
+                    Err(error) => {
+                        let error = verdict(session.failure(), error);
+                        completion.downlink = match session.downlink() {
+                            crate::transport::Downlink::Framed => "framed",
+                            crate::transport::Downlink::Outer => "outer",
+                            crate::transport::Downlink::Direct => "direct",
+                        };
+                        completion.finish(Some(&error));
+                        Outcome::Failed(error)
+                    }
                 }
             }
         }
