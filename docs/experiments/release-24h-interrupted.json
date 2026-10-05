@@ -1,0 +1,49 @@
+{
+  "status": "interrupted-infrastructure",
+  "passed": false,
+  "completed_endurance": false,
+  "reason": "exec-server transport disconnected; session recovery timed out; progress stopped; no final report or terminal exit receipt",
+  "last_progress": {
+    "status": "running",
+    "passed": false,
+    "started_utc": "2026-10-04T05:57:10.601059+00:00",
+    "source_commit": "c1fdd8e62b33c95a2fadf3695bf77e9a13ecd85e",
+    "binary_sha256": "bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32",
+    "requested_seconds": 86400.0,
+    "elapsed_seconds": 14573.938016387,
+    "sample": {
+      "monotonic": 23438.035379272,
+      "rss_kib": 3268,
+      "fds": 27,
+      "threads": 10,
+      "cpu_seconds": 68.17
+    }
+  },
+  "last_resource_snapshot": {
+    "timestampUnixMs": 1791107981509,
+    "level": "debug",
+    "event": "resources",
+    "active": 8,
+    "trackedHighWater": 11,
+    "connectionsAvailable": 248,
+    "handshakesAvailable": 32,
+    "probesAvailable": 4,
+    "sparesAvailable": 16,
+    "accepted": 30233,
+    "carried": 29739,
+    "failed": 485,
+    "panicked": 0,
+    "cancelled": 0
+  },
+  "sample_count": 2915,
+  "rss_min_kib": 2224,
+  "rss_max_kib": 3352,
+  "last_sample": {
+    "monotonic": 23438.035379272,
+    "rss_kib": 3268,
+    "fds": 27,
+    "threads": 10,
+    "cpu_seconds": 68.17
+  },
+  "observed_at_utc": "2026-10-04T10:35:42Z"
+}

@@ -1,0 +1,70 @@
+name: Verified stable release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag matching Cargo.toml (for example v0.1.0)
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Enforce main, exact version and completed endurance evidence
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          python3 - <<'PY'
+          import os, re, tomllib
+          version = tomllib.load(open('Cargo.toml', 'rb'))['package']['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+          assert os.environ['RELEASE_TAG'] == 'v' + version
+          PY
+          python3 scripts/release/check_evidence.py
+  validation:
+    needs: evidence
+    uses: ./.github/workflows/ci.yml
+  packet-faults:
+    needs: evidence
+    uses: ./.github/workflows/packet-experiments.yml
+  publish:
+    needs: [evidence, validation, packet-faults]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: rust-reality-client-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify every asset and publish once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          sha256sum --check --strict SHA256SUMS
+          # Refuse to replace a version that already exists. A rerun cannot
+          # silently overwrite files users may already have downloaded.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release already exists: inspect it rather than overwriting.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --draft --title "rust-reality-client $RELEASE_TAG" \
+            --notes-file ../docs/RELEASE_NOTES.md \
+            ./*.tar.gz ./*.zip SHA256SUMS
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

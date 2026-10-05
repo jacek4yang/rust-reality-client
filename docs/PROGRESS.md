@@ -46,3 +46,47 @@ separate decision; they are not implied by successful laboratory acceptance.
 Recovery: `git fetch origin` then `git switch checkpoint/production-hardening`.
 Generated fixture keys and local runtime configurations stay ignored. No user
 computer, production node, port 10808/10809 or account credential was changed.
+
+## Reopened release validation (2026-10-04)
+
+The user requested deeper testing and a final Release. The repository and pinned
+server were recovered from HTTPS after the temporary execution environment was
+replaced. Previous committed evidence was preserved. No runtime source or
+lockfile changes have been made in this phase.
+
+A continuous 24-hour Handoff/recovery soak started at 2026-10-04 05:57 UTC, using
+the downloaded and checksum-verified c1fdd8e musl CI executable (SHA-256
+bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32).
+Incremental progress is explicitly marked running, never passed. The completed
+report must be committed separately before the release gate can pass.
+
+New resource tests include malformed HTTP/SOCKS traffic, partial-head deadlines,
+1150 simultaneous connection attempts, RLIMIT_NOFILE=128 on the isolated child,
+continued established payload under pressure, new connections after recovery,
+and a bounded SIGTERM grace with every permit returned. Initial test-harness
+assumptions about the tracking cap and libc error strings were corrected; failed
+preliminary reports are not acceptance passes.
+
+Publication is gated on the continuous run, matching runtime file hashes, exact
+version, all CI jobs, fresh packet faults and tests of packaged executables.
+The final workflow is main-only. Confirmation to merge PR #5/#7 and release
+preparation into main was requested in chat and is pending.
+
+### Infrastructure interruption (2026-10-04 10:35 UTC)
+
+The original 24-hour attempt lost its execution transport after the last sample
+at 14573.938 s. Recovery of exec session 72330 timed out; there is no final report
+or terminal exit receipt. This is NOT a completed endurance pass. The last
+snapshot had 8 active healthy workload streams, 27 FDs, 3268 KiB RSS and no
+panics; interrupted evidence is retained in `release-24h-interrupted.json`.
+The previously announced next-day completion estimate is withdrawn.
+
+Exact d2a6cce CI 37182730520 passed all 12 jobs, and packet run 37182344060 passed
+all three. Downloaded raw package/audit evidence is retained separately.
+
+A new GitHub-hosted five-hour GNU/musl package matrix provides a bounded run
+with persistent remote results, within GitHub's six-hour job limit. It does not
+satisfy the existing 24-hour release gate. The user was asked whether a clearly
+scoped five-hour release standard is acceptable, or whether a continuously
+available host must first complete 24 hours. That decision and merge approval
+are pending; do not silently lower the publication gate.

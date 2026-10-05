@@ -282,3 +282,38 @@ The healthy f12942e hour and pre-timeout hour are also separate. Different
 versions and overlapping runs must never be added into a claim of one continuous
 multi-hour run of the final candidate. The interrupted cursor-candidate soak is
 not a completed acceptance run.
+
+## Release validation, 2026-10-04 (continuous endurance still running)
+
+Runtime remains c1fdd8e; the musl package is the verified executable from CI
+37156375539, SHA-256 bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32.
+
+- `release-resource-musl.json`: 1000 correct malformed-input refusals; unfinished
+  HTTP/SOCKS heads close in 15.00 s; 1150 connect attempts are bounded by the
+  HTTP connection admission budget. Descriptor exhaustion is induced exclusively
+  in a child with RLIMIT_NOFILE=128. An already established stream remains usable;
+  after freeing pressure both inbounds establish new sessions. Two seconds under
+  EMFILE consumes 0.00 sampled CPU seconds, avoiding an accept-error spin. SIGTERM
+  while a session remains open takes 10.01–10.04 s; one expected cancellation is
+  counted and all connection/handshake/probe/spare permits return.
+- `release-multi-entry-musl.json`: two genuine pinned entry processes share one
+  genuine pinned LANDING. Across three rounds, SIGSTOP on entry A forces new
+  sessions to B in about 155 ms on loopback. Killing B produces an explicit
+  terminal on its existing stream; the previously established A stream survives
+  after A resumes. All 300 new application connections through the surviving
+  entry are byte-exact. This is new-session recovery, not established-session
+  migration, shared-LANDING redundancy, WAN timing or a provider retry test.
+- Preliminary resource-harness assertions were corrected before accepting these
+  runs: the first fast connect loop timed out before reaching pressure; a mixed
+  HTTP/SOCKS attempt did not exercise the assumed 1024 tracking cap; HTTP actually
+  admits 256 connections before reading a head. The final test checks that real
+  admission budget. musl's EMFILE text differs from glibc; the check now uses
+  the event plus OS error 24. No runtime change was needed for these corrections.
+- `scripts/release/tests/test_gate.py` uses explicitly synthetic records to test
+  rejection of absent/short/wrong-source evidence, leaked resources, draft notes
+  and changed runtime files. These are seven release-logic unit tests, never
+  reported as actual endurance tests.
+
+The real 24-hour run began 2026-10-04 05:57 UTC. Its incremental progress is not a
+pass. A completed report and unchanged-runtime manifest are mandatory before
+publication. This section will be updated once that run terminates.
