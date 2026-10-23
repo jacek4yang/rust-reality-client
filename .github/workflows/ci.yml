@@ -166,14 +166,21 @@ jobs:
             --client target/release/rust-reality-client \
             --mib 64 --streams 8 --rounds 2 --pings 1000 --setups 50 \
             --output target/bulk-stability/report.json
+          python3 scripts/interop/idle_capacity.py \
+            --client target/release/rust-reality-client \
+            --connections 256 --output target/idle-capacity/report.json
       - name: Stability report
         if: always()
-        run: cat target/bulk-stability/report.json || true
+        run: |
+          cat target/bulk-stability/report.json || true
+          cat target/idle-capacity/report.json || true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: bulk-stability
-          path: target/bulk-stability/report.json
+          name: stability-evidence
+          path: |
+            target/bulk-stability/report.json
+            target/idle-capacity/report.json
           if-no-files-found: warn
 
       - name: Exercise JSON through the actual CLI and TLS applications

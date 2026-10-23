@@ -725,7 +725,10 @@ everything, and what each socket is proved to hold.
   returns nothing. There is one task per connection on the shared runtime, no second
   runtime and no queue between the two sockets, so backpressure arrives as unread
   socket bytes rather than as memory. Box 26's footprint line is the same claim over
-  1074 connections: descriptors 13 → 13, threads 2 → 2.
+  1074 connections: descriptors 13 → 13, threads 2 → 2. At the full
+  256-connection ceiling, measured loaded RSS was 17.7 MiB (about 50.5 KiB per
+  idle connection) with 522 descriptors; after close, 10 descriptors remained
+  and RSS was 16.6 MiB.
 
 ## ClientHello fingerprints
 

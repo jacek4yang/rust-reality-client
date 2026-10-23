@@ -455,16 +455,24 @@ reset rather than a local key-exhausted error. The process stayed alive, RSS
 moved from 4.9 to 5.3 MiB, and descriptors returned from 11 to 10. Neither
 direction retried or migrated.
 
-A separate 600.06 s application soak ran against the pinned v2.0.1 server with
-two isolated Handoff processes: four WSS streams (TLS 1.2 and 1.3, each through
-HTTP and SOCKS) carried 200 checked messages each and closed with code 1000;
-four SSE streams delivered 2993 sequential events each; 1162 short WSS
-connections churned; and 20 origin resets, 20 local cancellations and 40
-explicit reconnections were injected. After drain the client had RSS 7.1 MiB,
-11 descriptors, 3.79 CPU seconds, `failed=0`, `panicked=0`, and every permit
+A separate 600.22 s application soak ran on the final committed build
+(`70f4d4d`, binary `53df6390…`) against the pinned v2.0.1 server with two
+isolated Handoff processes: four WSS streams (TLS 1.2 and 1.3, each through HTTP
+and SOCKS) carried 200 checked messages each and closed with code 1000; four SSE
+streams delivered 2994 sequential events each; 1161 short WSS connections
+churned; and 20 origin resets, 20 local cancellations and 40 explicit
+reconnections were injected. After drain the client had RSS 8.2 MiB, 11
+descriptors, 4.13 CPU seconds, `failed=0`, `panicked=0`, and every permit
 returned. Application round-trip percentiles were P50/P95/P99
-1.31/2.61/3.55 ms. Both `direct` and `outer` downlinks were observed. The
-report is `target/application-soak-10m/report.json` (ignored).
+1.39/2.93/3.80 ms. Both `direct` and `outer` downlinks were observed. The
+report is `target/application-soak-final-10m/report.json` (ignored).
+
+`idle_capacity.py` opened the full 256 local-connection ceiling, one echo byte
+each. All 256 established; loaded RSS was 17.7 MiB (about 50.5 KiB per idle
+connection) with 522 descriptors. After closing them the client held 10
+descriptors and 16.6 MiB. The nominal relay reservation at the ceiling is about
+48 MiB; untouched pages keep measured RSS lower until a connection carries
+bulk data. This is a capacity check, not a throughput result.
 
 Five rounds of 256 MiB, one stream, with the aligned buffers:
 
