@@ -151,14 +151,29 @@ jobs:
 
       - name: Bulk transfers, latency and resource stability
         run: |
+          set -euo pipefail
+          # The interop step's trap has already stopped its fixture, so this
+          # step owns a fresh one for the bulk and capacity checks.
+          INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+            bash scripts/interop/upstream-server.sh > "$RUNNER_TEMP/stability-node.log" 2>&1 &
+          node=$!
+          trap 'kill "$node" 2>/dev/null || true' EXIT INT TERM
+          for _ in $(seq 1 120); do
+            if [[ -s target/interop/handoff.env ]]; then break; fi
+            sleep 0.5
+          done
+          if [[ ! -s target/interop/handoff.env ]]; then
+            echo "stability fixture never published its handoff" >&2
+            cat "$RUNNER_TEMP/stability-node.log" >&2
+            exit 1
+          fi
           set -a
           . target/interop/handoff.env
           set +a
-          # The handoff publishes the address a Windows host would use to reach a
-          # WSL guest; client and node share this runner, so loopback is honest.
+          # Client and node share this runner, so loopback is the honest address.
           export RRC_INTEROP_ADDR="$RRC_INTEROP_LOOPBACK"
           cargo build --release --locked
-          mkdir -p target/bulk-stability
+          mkdir -p target/bulk-stability target/idle-capacity
           # Eight concurrent streams, digest-checked in both directions, then
           # ping-pong and fresh-connection latency. The harness rejects descriptor
           # or RSS growth and a latency outlier, so this is a gate, not a report.
