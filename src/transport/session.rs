@@ -1567,7 +1567,10 @@ mod tests {
             USER,
         )
         .expect("session");
-        let payload: Vec<u8> = (0..=250_u8).cycle().take(20_000).collect();
+        let payload: Vec<u8> = (0..=250_u8)
+            .cycle()
+            .take(crate::transport::RELAY_BUFFER + 123)
+            .collect();
         let expected = payload.clone();
         let reader = tokio::spawn(async move {
             let mut wire = Vec::new();
@@ -1603,6 +1606,97 @@ mod tests {
             }
         }
         assert_eq!(recovered, expected);
+    }
+
+    /// Socket fragmentation is arbitrary, and a Direct boundary can fall in the
+    /// middle of a record. Feed framed records, a Direct frame with an in-record
+    /// tail, and raw bytes in pseudo-random socket chunks; every byte must arrive
+    /// once and in order.
+    #[tokio::test]
+    async fn random_socket_fragmentation_preserves_framed_and_direct_bytes() {
+        let (mut session, mut node) = answered().await;
+        let mut expected = Vec::new();
+        let mut wire = Vec::new();
+        for index in 0..8_u8 {
+            let payload = vec![index; 700 + usize::from(index) * 13];
+            let plan = node
+                .encoder
+                .plan(payload.len(), Command::Continue, false)
+                .expect("frame plan");
+            let mut plaintext = vec![0_u8; plan.wire_len()];
+            node.encoder.assemble(&plan, &payload, &mut plaintext);
+            node.encoder.commit(&plan);
+            expected.extend_from_slice(&payload);
+            node.downlink
+                .seal(ContentType::ApplicationData, &plaintext, &mut wire)
+                .expect("continue record");
+        }
+
+        let payload = b"direct-payload".to_vec();
+        let plan = node
+            .encoder
+            .plan(payload.len(), Command::Direct, false)
+            .expect("direct plan");
+        let mut plaintext = vec![0_u8; plan.wire_len() + 97];
+        node.encoder
+            .assemble(&plan, &payload, &mut plaintext[..plan.wire_len()]);
+        plaintext[plan.wire_len()..].fill(0x5a);
+        node.encoder.commit(&plan);
+        expected.extend_from_slice(&payload);
+        expected.extend(std::iter::repeat_n(0x5a, 97));
+        node.downlink
+            .seal(ContentType::ApplicationData, &plaintext, &mut wire)
+            .expect("direct record");
+
+        let tail = b"raw-tail-".repeat(50);
+        expected.extend_from_slice(&tail);
+
+        let mut state = 0x1234_5678_u32;
+        let mut cursor = 0;
+        while cursor < wire.len() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let count = ((state >> 16) as usize % 61 + 1).min(wire.len() - cursor);
+            node.stream
+                .write_all(&wire[cursor..cursor + count])
+                .await
+                .expect("chunk");
+            cursor += count;
+        }
+        node.stream.write_all(&tail).await.expect("raw tail");
+        node.stream.shutdown().await.expect("raw EOF");
+
+        let mut got = Vec::new();
+        let mut buffer = [0_u8; 73];
+        loop {
+            let read = session.read(&mut buffer).await.expect("read");
+            if read == 0 {
+                break;
+            }
+            got.extend_from_slice(&buffer[..read]);
+            assert!(got.len() <= expected.len(), "read past the expected stream");
+        }
+        assert_eq!(got, expected);
+    }
+
+    /// A read that already delivered payload must not turn a later framing
+    /// failure into an error that discards those bytes. The failure surfaces on
+    /// the next call, with the payload intact.
+    #[tokio::test]
+    async fn data_delivered_before_a_corrupt_header_is_not_lost() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"first", Command::Continue).await;
+        node.stream
+            .write_all(&[22, 3, 3, 0, 5])
+            .await
+            .expect("corrupt header");
+        let mut buffer = [0_u8; 64];
+        let read = session.read(&mut buffer).await.expect("payload is delivered");
+        assert_eq!(&buffer[..read], b"first");
+        let error = session
+            .read(&mut buffer)
+            .await
+            .expect_err("the corrupt header fails the next read");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     /// Half-close is the alert the node reads as a destination `FIN`, followed by

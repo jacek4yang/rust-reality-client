@@ -842,6 +842,18 @@ everything, and what each socket is proved to hold.
   send KeyUpdate; the record budget is a protocol limit, documented in
   Operations.
 
+- [x] **41. The final build survives a ten-minute mixed WSS/SSE soak.**
+
+  Against the pinned v2.0.1 server with two isolated Handoff processes, the
+  final build ran 600.22 seconds: four WSS streams (TLS 1.2 and 1.3 through
+  HTTP and SOCKS) carried 200 checked messages each with close code 1000, four
+  SSE streams delivered 2994 sequential events each, 1161 short WSS connections
+  churned, and 20 origin resets, 20 local cancellations and 40 explicit
+  reconnections were injected. After drain: `failed=0`, `panicked=0`, RSS
+  8.2 MiB, 11 descriptors, all permits returned, and application round-trip
+  P50/P95/P99 of 1.39/2.93/3.80 ms. Both `direct` and `outer` downlinks were
+  observed. This is loopback fixture evidence, not a WAN or provider test.
+
 ---
 
 ## What this file does not establish

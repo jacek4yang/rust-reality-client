@@ -105,6 +105,14 @@ database, no web UI. The layers and their job:
 | Wire | `protocol` | VLESS framing, REALITY, TLS 1.3 records, Vision |
 | Host | `config`, `logging`, `error` | validation, redaction, the failure taxonomy |
 
+The relay moves a 130,992-byte uplink chunk (sixteen 8 KiB Vision frames) and a
+65,536-byte downlink chunk, then reuses those buffers; the full 256-connection
+ceiling measured 17.7 MiB resident. Loopback fixtures recorded 1056/902 MiB/s on
+one raw stream, 2219/2138 MiB/s on eight, and 0.27 ms application RTT; the exact
+fixtures, hashes and caveats are in
+[`docs/experiments/README.md`](docs/experiments/README.md). These are shared-host
+loopback measurements, not WAN capacity or a provider guarantee.
+
 The layering exists to protect one boundary, stated in full in section 18:
 **node choice is only possible before the application is told the tunnel
 exists.** `Scheduler` sits above `Handoff` and below the inbounds precisely

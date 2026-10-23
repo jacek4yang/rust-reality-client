@@ -1265,39 +1265,44 @@ mod tests {
     /// same record as the copy-in path, and the result must open on the peer.
     #[test]
     fn in_place_record_matches_seal_byte_for_byte() {
-        let transcript = HashAlgorithm::Sha256.digest(b"in-place");
-        let schedule = KeySchedule::new(CipherSuite::Aes128GcmSha256, &[9; 32], &transcript)
-            .expect("schedule");
-        let keys = schedule
-            .traffic_keys(schedule.server_handshake_secret())
-            .expect("keys");
-        let (mut sealed, mut in_place, mut reader) = (
-            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("sealed"),
-            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("in place"),
-            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("reader"),
-        );
-        let plaintext: Vec<u8> = (0..=250_u8).cycle().take(8_187).collect();
+        for suite in [
+            CipherSuite::Aes128GcmSha256,
+            CipherSuite::Aes256GcmSha384,
+            CipherSuite::ChaCha20Poly1305Sha256,
+        ] {
+            let transcript = suite.hash().digest(b"in-place");
+            let schedule = KeySchedule::new(suite, &[9; 32], &transcript).expect("schedule");
+            let keys = schedule
+                .traffic_keys(schedule.server_handshake_secret())
+                .expect("keys");
+            let (mut sealed, mut in_place, mut reader) = (
+                RecordLayer::new(suite, &keys).expect("sealed"),
+                RecordLayer::new(suite, &keys).expect("in place"),
+                RecordLayer::new(suite, &keys).expect("reader"),
+            );
+            let plaintext: Vec<u8> = (0..=250_u8).cycle().take(8_187).collect();
 
-        let mut expected = Vec::new();
-        sealed
-            .seal(ContentType::ApplicationData, &plaintext, &mut expected)
-            .expect("seal");
+            let mut expected = Vec::new();
+            sealed
+                .seal(ContentType::ApplicationData, &plaintext, &mut expected)
+                .expect("seal");
 
-        let mut actual = Vec::new();
-        let start = in_place
-            .begin_record(plaintext.len(), &mut actual)
-            .expect("begin");
-        actual[start + RECORD_HEADER_LEN..start + RECORD_HEADER_LEN + plaintext.len()]
-            .copy_from_slice(&plaintext);
-        in_place
-            .finish_record(start, ContentType::ApplicationData, &mut actual)
-            .expect("finish");
+            let mut actual = Vec::new();
+            let start = in_place
+                .begin_record(plaintext.len(), &mut actual)
+                .expect("begin");
+            actual[start + RECORD_HEADER_LEN..start + RECORD_HEADER_LEN + plaintext.len()]
+                .copy_from_slice(&plaintext);
+            in_place
+                .finish_record(start, ContentType::ApplicationData, &mut actual)
+                .expect("finish");
 
-        assert_eq!(actual, expected);
-        let mut copy = actual.clone();
-        let (kind, opened) = reader.open(&mut copy).expect("open");
-        assert_eq!(kind, ContentType::ApplicationData);
-        assert_eq!(opened, plaintext.as_slice());
+            assert_eq!(actual, expected);
+            let mut copy = actual.clone();
+            let (kind, opened) = reader.open(&mut copy).expect("open");
+            assert_eq!(kind, ContentType::ApplicationData);
+            assert_eq!(opened, plaintext.as_slice());
+        }
     }
 
     #[test]
