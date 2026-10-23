@@ -132,6 +132,8 @@ pub struct VisionSession<S> {
     readable_at: usize,
     /// sealed records the socket has not taken yet
     outgoing: Vec<u8>,
+    /// bytes of `outgoing` the socket has already accepted
+    outgoing_at: usize,
     /// the record plaintext being assembled
     frame: Vec<u8>,
     response: [u8; RESPONSE_LEN],
@@ -263,8 +265,10 @@ where
             readable: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             readable_at: 0,
             outgoing: Vec::with_capacity(
-                UPLINK_BATCH_FRAMES * RecordLayer::record_wire_len(FRAME_SIZE),
+                UPLINK_BATCH_FRAMES * RecordLayer::record_wire_len(FRAME_SIZE)
+                    + RecordLayer::record_wire_len(CLOSE_NOTIFY_ALERT.len()),
             ),
+            outgoing_at: 0,
             frame: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             response: [0; RESPONSE_LEN],
             response_at: 0,
@@ -299,30 +303,35 @@ where
     }
 
     fn poll_flush_outgoing(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while !self.outgoing.is_empty() {
+        while self.outgoing_at < self.outgoing.len() {
             // Bound the write to its own statement: taking the socket's result
             // inside `match` would keep `outgoing` borrowed across the arms,
             // which are the only places that shorten it.
-            let written = Pin::new(&mut self.stream).poll_write(context, &self.outgoing);
+            let written = Pin::new(&mut self.stream)
+                .poll_write(context, &self.outgoing[self.outgoing_at..]);
             match written {
                 // A zero-length write on an established socket is the way tokio
                 // reports that the peer is gone.
                 Poll::Ready(Ok(0)) => {
                     self.outgoing.clear();
+                    self.outgoing_at = 0;
                     return Poll::Ready(Err(
                         self.fail(Error::Transport(TransportError::BrokenPipe))
                     ));
                 }
                 Poll::Ready(Ok(count)) => {
-                    self.outgoing.drain(..count);
+                    self.outgoing_at += count;
                 }
                 Poll::Ready(Err(error)) => {
                     self.outgoing.clear();
+                    self.outgoing_at = 0;
                     return Poll::Ready(Err(self.fail(socket_failure(&error))));
                 }
                 Poll::Pending => return Poll::Pending,
             }
         }
+        self.outgoing.clear();
+        self.outgoing_at = 0;
         Poll::Ready(Ok(()))
     }
 
@@ -537,7 +546,7 @@ impl<S> fmt::Debug for VisionSession<S> {
             // belongs to the application and is not this client's to print.
             .field("incoming", &self.incoming.len())
             .field("readable", &self.readable.len())
-            .field("outgoing", &self.outgoing.len())
+            .field("outgoing", &(self.outgoing.len() - self.outgoing_at))
             .field("awaiting_response", &self.awaiting_response)
             .field("downlink", &self.downlink)
             .field("peer_closed", &self.peer_closed)
@@ -566,6 +575,7 @@ where
         if let Some(error) = this.failure() {
             return Poll::Ready(Err(into_io_error(&error)));
         }
+        let started = buffer.filled().len();
         loop {
             if this.readable_at < this.readable.len() {
                 let taken = (this.readable.len() - this.readable_at).min(buffer.remaining());
@@ -574,20 +584,41 @@ where
                     buffer.put_slice(&this.readable[start..start + taken]);
                     this.readable_at = start + taken;
                 }
-                return Poll::Ready(Ok(()));
+                if buffer.remaining() == 0 {
+                    return Poll::Ready(Ok(()));
+                }
             }
-            this.readable.clear();
-            this.readable_at = 0;
-            if this.downlink == Downlink::Direct {
-                return this.poll_raw(context, buffer);
-            }
-            if this.peer_closed {
-                return Poll::Ready(Ok(()));
-            }
-            match this.poll_record(context) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(into_io_error(&error))),
-                Poll::Pending => return Poll::Pending,
+            if this.readable_at >= this.readable.len() {
+                this.readable.clear();
+                this.readable_at = 0;
+                if this.downlink == Downlink::Direct {
+                    return match this.poll_raw(context, buffer) {
+                        Poll::Pending if buffer.filled().len() > started => {
+                            Poll::Ready(Ok(()))
+                        }
+                        outcome => outcome,
+                    };
+                }
+                if this.peer_closed {
+                    return Poll::Ready(Ok(()));
+                }
+                match this.poll_record(context) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(error)) => {
+                        return if buffer.filled().len() > started {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Ready(Err(into_io_error(&error)))
+                        };
+                    }
+                    Poll::Pending => {
+                        return if buffer.filled().len() > started {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Pending
+                        };
+                    }
+                }
             }
         }
     }
@@ -617,7 +648,7 @@ where
                 "this session's uplink is closed",
             )));
         }
-        if !this.outgoing.is_empty() {
+        if this.outgoing_at < this.outgoing.len() {
             match this.poll_flush_outgoing(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(into_io_error(&error))),
@@ -665,7 +696,7 @@ where
         if let Some(error) = this.failure() {
             return Poll::Ready(Err(into_io_error(&error)));
         }
-        if !this.outgoing.is_empty() {
+        if this.outgoing_at < this.outgoing.len() {
             match this.poll_flush_outgoing(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(into_io_error(&error))),
@@ -1419,6 +1450,76 @@ mod tests {
             received.extend(node.receive_frame().await);
         }
         assert_eq!(received, payload[..accepted]);
+    }
+
+    /// The session keeps draining records that are already buffered, so one
+    /// caller read can carry several records instead of returning after each.
+    #[tokio::test]
+    async fn one_read_drains_several_buffered_records() {
+        let (mut session, mut node) = answered().await;
+        node.frame(b"alpha", Command::Continue).await;
+        node.frame(b"beta", Command::Continue).await;
+
+        let mut buffer = [0_u8; 64];
+        let read = session.read(&mut buffer).await.expect("reads");
+        assert_eq!(&buffer[..read], b"alphabeta");
+    }
+
+    /// A socket that accepts bytes slowly still receives the whole batch once,
+    /// in order. This covers the offset-based flush: the queued batch is never
+    /// compacted or replayed while a write is partial.
+    #[tokio::test]
+    async fn a_partially_written_batch_is_completed_without_loss_or_reordering() {
+        let (client_out, mut node_uplink, _node_downlink, client_in) = layers();
+        let (stream, mut sink) = tokio::io::duplex(64);
+        let mut session = VisionSession::from_channels(
+            stream,
+            Negotiated {
+                suite: SUITE,
+                alpn: None,
+                key_share_group: X25519_GROUP,
+            },
+            client_in,
+            client_out,
+            USER,
+        )
+        .expect("session");
+        let payload: Vec<u8> = (0..=250_u8).cycle().take(20_000).collect();
+        let expected = payload.clone();
+        let reader = tokio::spawn(async move {
+            let mut wire = Vec::new();
+            sink.read_to_end(&mut wire).await.expect("wire");
+            wire
+        });
+
+        session.write_all(&payload).await.expect("writes");
+        session.flush().await.expect("flush");
+        session.shutdown().await.expect("shutdown");
+        drop(session);
+        let mut wire = reader.await.expect("reader");
+
+        let mut decoder = Decoder::new(USER);
+        let mut recovered = Vec::new();
+        let mut cursor = 0;
+        while cursor < wire.len() {
+            let total = RecordLayer::record_len(&wire[cursor..])
+                .expect("header")
+                .expect("whole header");
+            let (kind, plaintext) = node_uplink
+                .open(&mut wire[cursor..cursor + total])
+                .expect("open");
+            cursor += total;
+            match kind {
+                ContentType::ApplicationData => {
+                    decoder
+                        .decode_append(plaintext, &mut recovered)
+                        .expect("frame");
+                }
+                ContentType::Alert => break,
+                other => panic!("unexpected record {other:?}"),
+            }
+        }
+        assert_eq!(recovered, expected);
     }
 
     /// Half-close is the alert the node reads as a destination `FIN`, followed by

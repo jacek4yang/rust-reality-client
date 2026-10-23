@@ -481,6 +481,20 @@ injects one of its own to make a dead session look alive.
   occupies a worker for a chunk rather than for a session, and there is no second
   runtime, queue or thread pool in front of it.
 
+### Traffic-key record budget
+
+TLS 1.3 AES-GCM retires a traffic key after `2^24` records
+(`src/protocol/tls13.rs:675`). One Vision uplink frame is at most 8 KiB, so a
+single session can send about 128 GiB before the key is exhausted; a downlink
+of 16 KiB records holds about 256 GiB. At the measured loopback ceiling this is
+roughly three minutes of maximum-rate upload or six minutes of download, but a
+typical AI request/response stream is orders of magnitude smaller. On exhaustion
+the session reports `session traffic key exhausted`; it does not silently
+resume, replay, or migrate the established stream, and the application must
+open a new connection. Client-initiated TLS KeyUpdate is not implemented in this
+build. Do not use one session for multi-hundred-gigabyte bulk transfers and
+expect it to outlive that budget.
+
 ## Measuring a build: interop and soak
 
 The gate that cannot be faked: an unmodified `rust-reality` v2.0.1 node, built from the

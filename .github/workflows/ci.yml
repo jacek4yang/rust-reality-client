@@ -149,6 +149,33 @@ jobs:
           export RRC_SOAK_SECONDS=30
           cargo test --locked --test interop_v201 -- --ignored --test-threads=1
 
+      - name: Bulk transfers, latency and resource stability
+        run: |
+          set -a
+          . target/interop/handoff.env
+          set +a
+          # The handoff publishes the address a Windows host would use to reach a
+          # WSL guest; client and node share this runner, so loopback is honest.
+          export RRC_INTEROP_ADDR="$RRC_INTEROP_LOOPBACK"
+          cargo build --release --locked
+          mkdir -p target/bulk-stability
+          # Eight concurrent streams, digest-checked in both directions, then
+          # ping-pong and fresh-connection latency. The harness rejects descriptor
+          # or RSS growth and a latency outlier, so this is a gate, not a report.
+          python3 scripts/interop/bulk_stability.py \
+            --client target/release/rust-reality-client \
+            --mib 64 --streams 8 --rounds 2 --pings 1000 --setups 50 \
+            --output target/bulk-stability/report.json
+      - name: Stability report
+        if: always()
+        run: cat target/bulk-stability/report.json || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: bulk-stability
+          path: target/bulk-stability/report.json
+          if-no-files-found: warn
+
       - name: Exercise JSON through the actual CLI and TLS applications
         run: |
           cargo build --release --locked
@@ -298,6 +325,38 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Offline regressions (live pinned-server tests run on Linux)
         run: cargo test --locked
+      - name: Release build and CLI smoke
+        run: |
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+          target/release/rust-reality-client.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "version failed" }
+          target/release/rust-reality-client.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "help failed" }
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.MSRV }}
+          components: ""
+      - name: MSRV
+        run: cargo check --locked --all-targets
+
+  macos:
+    name: macOS portable core regression
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline regressions (live pinned-server tests run on Linux)
+        run: cargo test --locked
+      - name: Release build and CLI smoke
+        run: |
+          cargo build --release --locked
+          target/release/rust-reality-client --version
+          target/release/rust-reality-client --help > /dev/null
       - uses: ./.github/actions/toolchain
         with:
           version: ${{ env.MSRV }}

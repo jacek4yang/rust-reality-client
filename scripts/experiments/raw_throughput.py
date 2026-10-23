@@ -16,6 +16,7 @@ import struct
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 BLOCK = b'x' * (1024 * 1024)
@@ -96,6 +97,23 @@ def process_cpu(pid):
 
 def process_rss_kib(pid):
     return int(Path(f'/proc/{pid}/statm').read_text().split()[1]) * 4096 // 1024
+
+
+def run_concurrent(proxy_port, target_port, size, direction, concurrency):
+    barrier = threading.Barrier(concurrency + 1)
+    action = upload if direction == 'U' else download
+
+    def job():
+        barrier.wait(timeout=20)
+        return action(proxy_port, target_port, size)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        jobs = [pool.submit(job) for _ in range(concurrency)]
+        begin = time.monotonic()
+        barrier.wait(timeout=20)
+        times = [job.result(timeout=180) for job in jobs]
+        wall = time.monotonic() - begin
+    return wall, times
 
 
 def upload(proxy_port, target_port, size):
@@ -181,13 +199,14 @@ def main():
     parser.add_argument('--client', type=Path, required=True)
     parser.add_argument('--xray', type=Path, required=True)
     parser.add_argument('--size-mib', type=int, default=256)
+    parser.add_argument('--concurrency', type=int, default=1)
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--rust-port', type=int, default=25001)
     parser.add_argument('--xray-port', type=int, default=25002)
     parser.add_argument('--work-dir', type=Path, default=Path('target/raw-throughput'))
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    assert args.size_mib > 0 and args.rounds > 0
+    assert args.size_mib > 0 and args.rounds > 0 and args.concurrency > 0
 
     size = args.size_mib * 1024 * 1024
     Sink.size = size
@@ -219,16 +238,21 @@ def main():
         for round_index in range(args.rounds):
             for label in (order if round_index % 2 == 0 else list(reversed(order))):
                 pid = clients[label].pid
+                proxy = args.rust_port if label == 'rust' else args.xray_port
                 cpu_before = process_cpu(pid)
-                up = upload(args.rust_port if label == 'rust' else args.xray_port,
-                            sink.server_address[1], size)
+                up_wall, up_times = run_concurrent(
+                    proxy, sink.server_address[1], size, 'U', args.concurrency)
                 cpu_after_up = process_cpu(pid)
-                down = download(args.rust_port if label == 'rust' else args.xray_port,
-                                source.server_address[1], size)
+                down_wall, down_times = run_concurrent(
+                    proxy, source.server_address[1], size, 'D', args.concurrency)
                 cpu_after = process_cpu(pid)
                 entry = {
-                    'upload_mib_s': args.size_mib / up,
-                    'download_mib_s': args.size_mib / down,
+                    'concurrency': args.concurrency,
+                    'size_mib_per_stream': args.size_mib,
+                    'upload_mib_s': args.size_mib * args.concurrency / up_wall,
+                    'download_mib_s': args.size_mib * args.concurrency / down_wall,
+                    'upload_stream_mib_s': sorted(args.size_mib / value for value in up_times),
+                    'download_stream_mib_s': sorted(args.size_mib / value for value in down_times),
                     'upload_cpu_seconds': cpu_after_up - cpu_before,
                     'download_cpu_seconds': cpu_after - cpu_after_up,
                     'rss_kib': process_rss_kib(pid),
@@ -237,7 +261,8 @@ def main():
                 print(label, round_index, json.dumps(entry), flush=True)
 
         report = {
-            'size_mib': args.size_mib,
+            'size_mib_per_stream': args.size_mib,
+            'concurrency': args.concurrency,
             'rounds': args.rounds,
             'results': results,
             'limitations': ['loopback', 'Python sink/source', 'raw TCP, no TLS origin',

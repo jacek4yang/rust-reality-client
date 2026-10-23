@@ -30,6 +30,7 @@ mkdir -p "$OUT"
 openssl req -x509 -newkey rsa:2048 -nodes -days "$DAYS" \
   -subj /CN=RRC-Interop-CA \
   -addext basicConstraints=critical,CA:TRUE \
+  -addext keyUsage=critical,keyCertSign,cRLSign \
   -keyout "$OUT/ca.key" -out "$OUT/ca.crt" 2>/dev/null
 
 openssl req -new -newkey rsa:2048 -nodes \

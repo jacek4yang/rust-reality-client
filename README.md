@@ -676,8 +676,11 @@ Known rough edges worth naming:
   outage is discovered by probe and breaker recovery rather than instantly.
 * The soak and interop suites need a live node and an echo destination; they are
   `#[ignore]`d locally and run in CI against the pinned `v2.0.1` commit.
-* Windows and macOS builds work and are tested in development, but the released
-  artifacts are Linux `x86_64-gnu`, `x86_64-musl` and `aarch64-gnu`.
+* Linux, Windows and macOS are built and tested in CI. Linux runs the live-node
+  interop, bulk-transfer/latency stability and application soak; Windows and
+  macOS run the full offline suite, strict Clippy, MSRV and a release-mode CLI
+  smoke. Released artifacts are Linux `x86_64-gnu`, `x86_64-musl` and
+  `aarch64-gnu`.
 
 ---
 

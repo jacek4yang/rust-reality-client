@@ -372,3 +372,60 @@ endpoints and no TLS origin mean these numbers do not establish WAN,
 application-level, or production superiority. They are not comparable with the
 user's separate Xray-to-Xray 854 MiB/s application result, which used different
 endpoints and a TLS-bearing workload.
+
+## TLS origins, concurrency and stability, 2026-10-24
+
+The optimized client (binary SHA-256
+`47dbbe213d37350fb97221b1b466097b4ff2de707c60d5e77059e72518ad521c`) was
+measured against the same rust-reality `main` node and official Xray 26.10.21.
+`bulk_profile.py` (64 MiB per transfer) runs through the fixture's real TLS 1.3
+and TLS 1.2 origins over one connection; values are medians of two rounds in
+MiB/s:
+
+| Origin | Client | Upload | Download |
+|---|---|---:|---:|
+| TLS 1.3 | Optimized | 599 | 495 |
+| TLS 1.3 | Xray 26.10.21 | 223 | 499 |
+| TLS 1.2 | Optimized | 616 | 565 |
+| TLS 1.2 | Xray 26.10.21 | 550 | 525 |
+| TLS 1.3 | Direct fixture control | 722 | 756 |
+| TLS 1.2 | Direct fixture control | 636 | 726 |
+
+The direct control bypasses the proxy, so it measures the Python TLS/hashing
+fixture and is neither an upper bound nor a proxy result. The four-connection
+rows are omitted on purpose: the direct arm also fell to 168–203 MiB/s, which
+means the Python fixture, not either client, bounded that run.
+
+Eight concurrent 32 MiB streams through the same server (`raw_throughput.py
+--concurrency 8`, three rounds):
+
+| Client | Aggregate upload MiB/s | Aggregate download MiB/s | Sampled RSS KiB |
+|---|---:|---:|---:|
+| Optimized | 1843 | 1804 | 7400 |
+| Xray 26.10.21 | 1801 | 389 | 36200 |
+
+One Xray upload round contained a 29 MiB/s straggler; the other two aggregated
+1801–1860 MiB/s. Xray's download aggregate was 389–399 MiB/s in every round.
+Upload is therefore parity at eight streams, download is 4.6x, and the client
+holds about one fifth of the RSS.
+
+`scripts/interop/bulk_stability.py` is the CI gate (two rounds of eight 64 MiB
+streams, every byte digest-checked). On the local WSL host it moved 358–385
+MiB/s aggregate, then measured 1000 ping-pongs at P50/P95/P99
+0.273/0.324/0.407 ms and 50 fresh connections at P50/P95 4.47/5.01 ms. RSS moved
+from 4.8 to 7.2 MiB (peak 7.5 MiB), descriptors from 11 to 10 (peak 26 while
+eight streams were open). The harness fails on a digest mismatch, P99 above
+250 ms, setup P95 above 5 s, or descriptor/RSS growth beyond its documented
+slack.
+
+The remaining stability ceiling is the traffic-key record budget: AES-GCM keys
+retire after `2^24` records, which at 8 KiB Vision frames is about 128 GiB of
+uplink (or 256 GiB of 16 KiB downlink) in one session. The session reports
+`session traffic key exhausted` and does not migrate or replay; see
+[Operations: traffic-key record budget](../OPERATIONS.md#traffic-key-record-budget).
+Typical AI request/response traffic is far below this, and client-initiated
+TLS KeyUpdate is not implemented.
+
+These measurements remain shared-host loopback evidence with Python endpoints.
+They do not establish WAN, application-level, or production superiority; the CI
+matrix adds Linux, Windows and macOS correctness coverage, not WAN capacity.
