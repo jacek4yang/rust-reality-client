@@ -34,7 +34,7 @@
 //!
 //! **A fixed cost per connection.** One [`RELAY_BUFFER`]-sized uplink buffer and
 //! one [`DOWNLINK_BUFFER`]-sized downlink buffer, allocated when the copy starts
-//! and reused for every chunk, so a relay holds about 65 KiB regardless of how
+//! and reused for every chunk, so a relay holds about 190 KiB regardless of how
 //! much it moves. That is the number the inbound's connection limits multiply
 //! against.
 //!
@@ -51,24 +51,24 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
 use crate::error::{Error, TransportError};
 
 /// Vision frames one relay chunk is sized for.
-pub(crate) const UPLINK_BATCH_FRAMES: usize = 4;
+pub(crate) const UPLINK_BATCH_FRAMES: usize = 16;
 
 /// Bytes one direction of a relay moves at a time.
 ///
 /// This is exactly [`UPLINK_BATCH_FRAMES`] full frame contents
 /// ([`FRAME_CONTENT_CAPACITY`](crate::protocol::vision::FRAME_CONTENT_CAPACITY)).
 /// Sizing it to a power of two instead leaves a few bytes over, and those bytes
-/// become a fifth, nearly empty record on every chunk: about 25 % of the traffic
-/// key's record budget wasted on a fast stream. Four full frames fit the chunk
-/// with no remainder, so every record carries its full capacity.
+/// become an extra, nearly empty record on every chunk: about a quarter of the
+/// traffic key's record budget wasted on a fast stream. Full frames fit the
+/// chunk with no remainder, so every record carries its full capacity.
 pub const RELAY_BUFFER: usize = UPLINK_BATCH_FRAMES * crate::protocol::vision::FRAME_CONTENT_CAPACITY;
 
 /// Bytes one downlink read hands to the local socket.
 ///
 /// A downlink record carries at most [`MAX_PLAINTEXT_LEN`](crate::protocol::tls13::MAX_PLAINTEXT_LEN)
-/// bytes, so two records fill this exactly. A buffer that is not a multiple of
-/// the record size leaves a few bytes to write separately after every pair.
-pub const DOWNLINK_BUFFER: usize = 2 * crate::protocol::tls13::MAX_PLAINTEXT_LEN;
+/// bytes, so four records fill this exactly. A buffer that is not a multiple of
+/// the record size leaves a few bytes to write separately after every group.
+pub const DOWNLINK_BUFFER: usize = 4 * crate::protocol::tls13::MAX_PLAINTEXT_LEN;
 
 /// What one relay carried before both directions closed.
 ///

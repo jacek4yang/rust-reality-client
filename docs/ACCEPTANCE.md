@@ -707,13 +707,13 @@ everything, and what each socket is proved to hold.
 
 - [x] **37. The hot path's cost is fixed and greppable.**
 
-  `RELAY_BUFFER` is 32,748 bytes uplink and `DOWNLINK_BUFFER` 32,768
+  `RELAY_BUFFER` is 130,992 bytes uplink and `DOWNLINK_BUFFER` 65,536
   (`src/transport/relay.rs:64-71`), and the copy is tokio's
   `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
   connection and reuses them for every chunk. A Vision session holds four buffers,
   each allocated once at construction (`src/transport/session.rs:260-269`),
-  including one full uplink batch for `outgoing`; later `resize`/fill calls
-  reuse those reservations or the fixed incoming buffer. The codec's production
+  including one full sixteen-record uplink batch for `outgoing`; later
+  `resize`/fill calls reuse those reservations or the fixed incoming buffer. The codec's production
   region allocates nothing — no `Vec::new`, `to_vec`, `format!` or `clone` anywhere
   above the test module at `src/protocol/vision.rs:579` — and nothing in
   `relay.rs`, `session.rs` or `vision.rs` logs:
@@ -821,6 +821,23 @@ everything, and what each socket is proved to hold.
   a REALITY handshake, and the earlier factory failure did not recur. This is a
   source fix; the already-published v0.1.1 artifact predates it and must be
   rebuilt from a commit that contains this box.
+
+- [x] **40. Bulk records use their full capacity and the key budget ends cleanly.**
+
+  `RELAY_BUFFER` is exactly sixteen Vision frame contents (130,992 bytes), so a
+  relay chunk no longer spills a few trailing bytes into an extra, nearly empty
+  record. A single upload session reached 137,357,164,544 bytes (127.9 GiB) in
+  127 s (1029 MiB/s) before reporting `session traffic key exhausted`; the
+  client stayed alive, descriptors returned from 11 to 10, and no byte was
+  retried. Before the alignment the same test stopped at 109,978,845,184 bytes
+  (102.4 GiB). A
+  downlink test reached 274,874,148,645 bytes (256.0 GiB) before the node reset
+  the connection at its own `2^24` record limit; the client logged the reset,
+  stayed alive, and returned its descriptors. The pinned v2.0.1 server rejects
+  post-handshake `Handshake` records
+  (`src/protocol/reality/tls13/application_io.rs:541`), so the client does not
+  send KeyUpdate; the record budget is a protocol limit, documented in
+  Operations.
 
 ---
 

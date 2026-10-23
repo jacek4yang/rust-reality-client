@@ -440,21 +440,57 @@ ends with a 20-byte fragment every second record.
 
 The record budget is the clearest evidence. Before alignment one upload session
 stopped at 109,978,845,184 bytes (102.4 GiB) with `session traffic key
-exhausted`. After alignment the same test reached 137,314,172,928 bytes
-(127.9 GiB) in 142.4 s (920 MiB/s), then reported the same explicit error. The
-client process stayed alive, RSS moved from 4.8 to 5.3 MiB, and descriptors
-returned from 11 to 10; no byte was retried. This is the full `2^24`-record
-budget for 8 KiB frames.
+exhausted`. After alignment, and with the final sixteen-frame batch, the same
+test reached 137,357,164,544 bytes (127.9 GiB) in 127.2 s (1029 MiB/s), then
+reported the same explicit error. The client process stayed alive, RSS moved
+from 4.8 to 5.4 MiB, and descriptors returned from 11 to 10; no byte was
+retried. This is the full `2^24`-record budget for 8 KiB frames.
+`scripts/experiments/record_limit.py` reproduces the trial; it is opt-in because
+it moves about 128 GiB over loopback.
+
+The downlink side reached 274,874,148,645 bytes (256.0 GiB) in 494.0 s
+(530.6 MiB/s) before the node reset the connection. The node seals downlink
+records and meets its own `2^24` limit first, so the client logs a transport
+reset rather than a local key-exhausted error. The process stayed alive, RSS
+moved from 4.9 to 5.3 MiB, and descriptors returned from 11 to 10. Neither
+direction retried or migrated.
+
+A separate 600.06 s application soak ran against the pinned v2.0.1 server with
+two isolated Handoff processes: four WSS streams (TLS 1.2 and 1.3, each through
+HTTP and SOCKS) carried 200 checked messages each and closed with code 1000;
+four SSE streams delivered 2993 sequential events each; 1162 short WSS
+connections churned; and 20 origin resets, 20 local cancellations and 40
+explicit reconnections were injected. After drain the client had RSS 7.1 MiB,
+11 descriptors, 3.79 CPU seconds, `failed=0`, `panicked=0`, and every permit
+returned. Application round-trip percentiles were P50/P95/P99
+1.31/2.61/3.55 ms. Both `direct` and `outer` downlinks were observed. The
+report is `target/application-soak-10m/report.json` (ignored).
 
 Five rounds of 256 MiB, one stream, with the aligned buffers:
 
 | Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | Sampled RSS KiB |
 |---|---:|---:|---:|
-| Aligned client | 826.2 (732.3–856.4) | 576.1 (512.4–887.5) | 5468 |
+| Four-frame batch | 826.2 (732.3–856.4) | 576.1 (512.4–887.5) | 5468 |
 | Xray 26.10.21 | 647.7 (596.2–690.5) | 255.0 (241.1–298.6) | 31976 |
 
 The download range is bimodal because the shared host slowed in later rounds;
 the first two rounds were 862–887 MiB/s. Upload stayed near 800 MiB/s.
+
+Widening the batch traded a bounded amount of memory for rate. The same
+single-stream shape and a three-round 8 × 32 MiB shape:
+
+| Uplink batch | Single up/down MiB/s | 8-stream up/down MiB/s | RSS (8 streams) |
+|---|---:|---:|---:|
+| 4 frames (32,748 B) | 826 / 576 | 1843 / 1804 | 7.4 MiB |
+| 8 frames (65,496 B) | 978 / 717 | 2170 / 2005 | 6.9–7.7 MiB |
+| 16 frames (130,992 B) | **1056 / 902** | **2219 / 2138** | 6.8–8.1 MiB |
+| Xray 26.10.21 | 648 / 255 | 1880 / 403 | 35–36 MiB |
+
+The sixteen-frame batch is the delivered setting. It reserves about 190 KiB of
+relay buffers and about 130 KiB of session batch per connection, so the
+256-connection ceiling is about 48 MiB of relay memory; measured RSS with eight
+active streams stayed under 8.1 MiB. Wider batches showed diminishing returns
+and were not adopted.
 
 `latency_compare.py` runs three alternating rounds of 1000 ping-pongs and 50
 fresh connections through each client:

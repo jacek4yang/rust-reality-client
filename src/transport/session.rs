@@ -266,7 +266,11 @@ where
                     + RecordLayer::record_wire_len(CLOSE_NOTIFY_ALERT.len()),
             ),
             outgoing_at: 0,
-            frame: Vec::with_capacity(MAX_PLAINTEXT_LEN),
+            // Only the preamble and close_notify use this scratch buffer now:
+            // data frames are assembled directly in the record plaintext. The
+            // longest preamble is a VLESS request plus one long-padded frame,
+            // well under 2 KiB; a resize covers any future growth.
+            frame: Vec::with_capacity(2 * 1024),
             response: [0; RESPONSE_LEN],
             response_at: 0,
             awaiting_response: true,
@@ -1435,6 +1439,25 @@ mod tests {
         assert_eq!(received, b"tail");
         assert!(session.peer_closed());
         assert!(session.failure().is_none(), "a half close is not a failure");
+    }
+
+    /// The pinned v2.0.1 node never sends a post-handshake handshake record,
+    /// and it would reject one from this side too. Refusing it explicitly is
+    /// what keeps a would-be `KeyUpdate` from being mistaken for payload.
+    #[tokio::test]
+    async fn a_post_handshake_handshake_record_is_refused() {
+        let (mut session, mut node) = answered().await;
+        node.send(ContentType::Handshake, &[0x18, 0, 0, 1, 0]).await;
+        let mut buffer = [0_u8; 8];
+        let error = session
+            .read(&mut buffer)
+            .await
+            .expect_err("handshake records are not application data");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            session.failure(),
+            Some(Error::Session(SessionError::UnexpectedContentType(22)))
+        );
     }
 
     #[tokio::test]

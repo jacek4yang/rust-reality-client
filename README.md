@@ -590,7 +590,7 @@ list.
    request itself states: 8 KiB for an HTTP head, 255 bytes for a domain, 16
    candidates from one resolution, one TLS record's wire length as the ceiling on
    any session read (`MAX_RECORD_WIRE_LEN`, `src/protocol/tls13.rs:674`), and an
-   32,748-byte uplink and 32,768-byte downlink relay buffers. Greeting, request and head reads each
+   130,992-byte uplink and 65,536-byte downlink relay buffers. Greeting, request and head reads each
    carry their own deadline. Concurrent handshakes, local connections, hedged
    attempts and probes are separately capped, so a local process that opens
    sockets and never speaks can grow the tracked table to 1024 and no further —

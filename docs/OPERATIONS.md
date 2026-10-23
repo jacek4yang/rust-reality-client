@@ -465,14 +465,15 @@ injects one of its own to make a dead session look alive.
 
 ### The hot path's fixed cost
 
-* 32,748 bytes uplink (`RELAY_BUFFER`) and 32,768 downlink (`DOWNLINK_BUFFER`,
+* 130,992 bytes uplink (`RELAY_BUFFER`) and 65,536 downlink (`DOWNLINK_BUFFER`,
   `src/transport/relay.rs:64`), allocated once per connection by the copy loop
-  and reused for every chunk. A relay holds about 65 KiB regardless of how much
-  it moves. The uplink size is exactly four frame capacities, so a chunk never
-  spills its last few bytes into a fifth, nearly empty record.
+  and reused for every chunk. A relay holds about 190 KiB regardless of how much
+  it moves. The uplink size is exactly sixteen frame capacities and the downlink
+  size exactly four records, so neither spills a few trailing bytes into an
+  extra, nearly empty record.
 * A Vision session holds four buffers, each allocated once at construction
   (`src/transport/session.rs:260-269`); `outgoing` is reserved for one full
-  four-record uplink batch, and the remaining `resize`/fill calls only grow
+  sixteen-record uplink batch, and the remaining `resize`/fill calls only grow
   within those reservations or reuse the fixed incoming buffer.
 * No allocation in the Vision codec's production path, no logging in
   `relay.rs`/`session.rs`/`vision.rs`, and no timer armed per chunk. These are
@@ -489,15 +490,20 @@ TLS 1.3 AES-GCM retires a traffic key after `2^24` records
 (`src/protocol/tls13.rs:675`). One Vision uplink frame is at most 8 KiB, so a
 single session can send about 128 GiB before the key is exhausted; a downlink
 of 16 KiB records holds about 256 GiB. A measured single-session upload reached
-137,314,172,928 bytes (127.9 GiB) in 142 s before the client reported
-`session traffic key exhausted`, with the process and its descriptors intact.
-At the measured loopback ceiling this is roughly three minutes of maximum-rate
-upload or six minutes of download, but a typical AI request/response stream is
-orders of magnitude smaller. On exhaustion the session does not silently
-resume, replay, or migrate; the application must open a new connection.
+137,357,164,544 bytes (127.9 GiB) in 127 s (1029 MiB/s) before the client
+reported `session traffic key exhausted`, with the process and its descriptors
+intact. A
+measured download reached 274,874,148,645 bytes (256.0 GiB) in 494 s before the
+node reset the connection: the node seals downlink records and reaches its own
+`2^24` limit first, so the client sees a transport reset rather than a local
+key-exhaustion error. Neither direction retries or migrates; open a new
+connection at the boundary.
 
-Client-initiated TLS KeyUpdate is not implemented. The pinned v2.0.1 server
-rejects a post-handshake `Handshake` record as `UnexpectedContentType`
+At the measured loopback ceiling this is roughly three minutes of maximum-rate
+upload or eight minutes of download, but a typical AI request/response stream is
+orders of magnitude smaller. Client-initiated TLS KeyUpdate is not implemented.
+The pinned v2.0.1 server rejects a post-handshake `Handshake` record as
+`UnexpectedContentType`
 (`src/protocol/reality/tls13/application_io.rs:541`), so sending one would break
 the wire contract this client is required to preserve. Do not use one session
 for multi-hundred-gigabyte bulk transfers and expect it to outlive that budget.

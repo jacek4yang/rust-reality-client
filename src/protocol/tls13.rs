@@ -1085,7 +1085,8 @@ impl std::fmt::Debug for RecordLayer {
 mod tests {
     use super::{
         ApplicationSecrets, CipherSuite, ContentType, HashAlgorithm, KeySchedule,
-        MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN, RecordLayer, TranscriptHash, TranscriptHasher,
+        MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN, RecordError, RecordLayer, TranscriptHash,
+        TranscriptHasher,
     };
 
     /// Decodes lowercase hex, ignoring the line continuations used in long
@@ -1258,6 +1259,64 @@ mod tests {
             }
             assert_eq!(writer.records_used(), 3);
         }
+    }
+
+    /// The in-place path used by Vision's data frames must produce exactly the
+    /// same record as the copy-in path, and the result must open on the peer.
+    #[test]
+    fn in_place_record_matches_seal_byte_for_byte() {
+        let transcript = HashAlgorithm::Sha256.digest(b"in-place");
+        let schedule = KeySchedule::new(CipherSuite::Aes128GcmSha256, &[9; 32], &transcript)
+            .expect("schedule");
+        let keys = schedule
+            .traffic_keys(schedule.server_handshake_secret())
+            .expect("keys");
+        let (mut sealed, mut in_place, mut reader) = (
+            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("sealed"),
+            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("in place"),
+            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("reader"),
+        );
+        let plaintext: Vec<u8> = (0..=250_u8).cycle().take(8_187).collect();
+
+        let mut expected = Vec::new();
+        sealed
+            .seal(ContentType::ApplicationData, &plaintext, &mut expected)
+            .expect("seal");
+
+        let mut actual = Vec::new();
+        let start = in_place
+            .begin_record(plaintext.len(), &mut actual)
+            .expect("begin");
+        actual[start + RECORD_HEADER_LEN..start + RECORD_HEADER_LEN + plaintext.len()]
+            .copy_from_slice(&plaintext);
+        in_place
+            .finish_record(start, ContentType::ApplicationData, &mut actual)
+            .expect("finish");
+
+        assert_eq!(actual, expected);
+        let mut copy = actual.clone();
+        let (kind, opened) = reader.open(&mut copy).expect("open");
+        assert_eq!(kind, ContentType::ApplicationData);
+        assert_eq!(opened, plaintext.as_slice());
+    }
+
+    #[test]
+    fn begin_record_refuses_an_oversized_payload_without_touching_output() {
+        let transcript = HashAlgorithm::Sha256.digest(b"too large");
+        let schedule = KeySchedule::new(CipherSuite::Aes128GcmSha256, &[3; 32], &transcript)
+            .expect("schedule");
+        let keys = schedule
+            .traffic_keys(schedule.server_handshake_secret())
+            .expect("keys");
+        let mut records =
+            RecordLayer::new(CipherSuite::Aes128GcmSha256, &keys).expect("record state");
+        let mut output = vec![0x5a_u8; 3];
+        assert_eq!(
+            records.begin_record(MAX_PLAINTEXT_LEN + 1, &mut output),
+            Err(RecordError::InvalidLength)
+        );
+        assert_eq!(output, [0x5a, 0x5a, 0x5a]);
+        assert_eq!(records.records_used(), 0, "a refused record consumes no sequence");
     }
 
     #[test]
