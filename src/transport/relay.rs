@@ -51,7 +51,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
 use crate::error::{Error, TransportError};
 
 /// Vision frames one relay chunk is sized for.
-pub(crate) const UPLINK_BATCH_FRAMES: usize = 16;
+pub const UPLINK_BATCH_FRAMES: usize = 16;
 
 /// Bytes one direction of a relay moves at a time.
 ///
