@@ -296,6 +296,76 @@ fn names_map_to_the_intended_shapes_and_unusable_names_are_refused() {
 }
 
 #[test]
+fn the_two_factory_encoding_bugs_and_record_version_stay_fixed() {
+    let (profile, record, _, _) = build(Fingerprint::Chrome133, 31);
+    let extensions = parse_extensions(record.message());
+    assert!(
+        extensions
+            .iter()
+            .any(|(kind, body)| *kind == 0x0005 && body.as_slice() == [1, 0, 0, 0, 0]),
+        "status_request must be status_type=1 plus two zero lengths"
+    );
+    assert!(
+        extensions
+            .iter()
+            .any(|(kind, body)| *kind == 0x002d && body.as_slice() == [1, 1]),
+        "psk_key_exchange_modes is extension 0x002d"
+    );
+    assert!(
+        !extensions.iter().any(|(kind, _)| *kind == 0x2d00),
+        "0x2d00 is not a TLS extension"
+    );
+    assert_eq!(
+        &[22, 3, 1],
+        &record.record()[..3],
+        "Chrome/Xray use the 0x0301 record version for the initial ClientHello"
+    );
+
+    let ciphers = profile
+        .ciphers
+        .iter()
+        .filter(|suite| **suite != GREASE_PLACEHOLDER)
+        .count();
+    let extension_count = extension_kinds(record.message())
+        .iter()
+        .filter(|kind| !is_grease(**kind))
+        .count();
+    assert_eq!(15, ciphers, "JA4 cipher count");
+    assert_eq!(16, extension_count, "JA4 extension count");
+}
+
+#[test]
+fn chrome_matches_the_captured_xray_ja4_cipher_hash() {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let profile = Fingerprint::Chrome133.resolve([32; 32]);
+    let mut ciphers: Vec<u16> = profile
+        .ciphers
+        .iter()
+        .copied()
+        .filter(|suite| *suite != GREASE_PLACEHOLDER)
+        .collect();
+    ciphers.sort_unstable();
+    let mut text = String::new();
+    for (index, suite) in ciphers.iter().enumerate() {
+        if index > 0 {
+            text.push(',');
+        }
+        let _ = write!(text, "{suite:04x}");
+    }
+    let digest = Sha256::digest(text.as_bytes());
+    let mut hash = String::new();
+    for byte in &digest[..6] {
+        let _ = write!(hash, "{byte:02x}");
+    }
+    assert_eq!(
+        "8daaf6152771", hash,
+        "JA4 cipher hash captured from Chrome/Xray 26.7.28"
+    );
+}
+
+#[test]
 fn every_profile_reports_a_bounded_record_and_a_32_byte_session_id() {
     for fingerprint in CONCRETE {
         let (_, record, _, _) = build(fingerprint, 27);

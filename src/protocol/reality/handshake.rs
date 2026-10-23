@@ -328,22 +328,33 @@ where
         .ok_or(Error::Handshake(HandshakeError::Protocol(
             "record content type",
         )))?;
+    let body_len = usize::from(u16::from_be_bytes([scratch[3], scratch[4]]));
+    // An alert that rejects the ClientHello is written before TLS 1.3 is
+    // negotiated, so its record version may be 0x0301 rather than 0x0303.
+    // Read it before the version check; otherwise a server that says
+    // decode_error is reported as a bogus record-version failure.
+    if outer == OUTER_ALERT {
+        if body_len != 2 {
+            return Err(Error::Handshake(HandshakeError::Protocol(
+                "peer sent a malformed alert",
+            )));
+        }
+        scratch.resize(RECORD_HEADER_LEN + body_len, 0);
+        stream
+            .read_exact(&mut scratch[RECORD_HEADER_LEN..])
+            .await
+            .map_err(socket_failure)?;
+        return Err(Error::Handshake(HandshakeError::Protocol(alert_text(
+            scratch[RECORD_HEADER_LEN + 1],
+        ))));
+    }
     if scratch.get(1..3) != Some(&[3, 3][..]) {
         return Err(Error::Handshake(HandshakeError::Protocol("record version")));
     }
-    let body_len = usize::from(u16::from_be_bytes([scratch[3], scratch[4]]));
     let limit = match outer {
         OUTER_HANDSHAKE => MAX_PLAINTEXT_LEN,
         OUTER_CHANGE_CIPHER_SPEC => 1,
         OUTER_APPLICATION_DATA => MAX_CIPHERTEXT_LEN,
-        // A cover target that rejects our hello says so in the clear, and that
-        // distinction is what the scheduler needs: it is a refusal, not a
-        // broken pipe.
-        OUTER_ALERT => {
-            return Err(Error::Handshake(HandshakeError::Protocol(
-                "peer sent a plaintext alert",
-            )));
-        }
         _ => {
             return Err(Error::Handshake(HandshakeError::Protocol(
                 "record content type",
@@ -359,6 +370,43 @@ where
         .await
         .map_err(socket_failure)?;
     Ok(outer)
+}
+
+/// A stable name for the alert description a peer sent in the clear.
+fn alert_text(description: u8) -> &'static str {
+    match description {
+        0 => "peer sent close_notify",
+        10 => "peer alert: unexpected_message",
+        20 => "peer alert: bad_record_mac",
+        21 => "peer alert: decryption_failed",
+        22 => "peer alert: record_overflow",
+        30 => "peer alert: decompression_failure",
+        40 => "peer alert: handshake_failure",
+        42 => "peer alert: bad_certificate",
+        43 => "peer alert: unsupported_certificate",
+        44 => "peer alert: certificate_revoked",
+        45 => "peer alert: certificate_expired",
+        46 => "peer alert: certificate_unknown",
+        47 => "peer alert: illegal_parameter",
+        48 => "peer alert: unknown_ca",
+        49 => "peer alert: access_denied",
+        50 => "peer alert: decode_error",
+        51 => "peer alert: decrypt_error",
+        60 => "peer alert: export_restriction",
+        70 => "peer alert: protocol_version",
+        71 => "peer alert: insufficient_security",
+        80 => "peer alert: internal_error",
+        86 => "peer alert: inappropriate_fallback",
+        90 => "peer alert: user_canceled",
+        100 => "peer alert: no_renegotiation",
+        109 => "peer alert: missing_extension",
+        110 => "peer alert: unsupported_extension",
+        112 => "peer alert: unrecognized_name",
+        115 => "peer alert: unknown_psk_identity",
+        116 => "peer alert: certificate_required",
+        120 => "peer alert: no_application_protocol",
+        _ => "peer sent a plaintext alert",
+    }
 }
 
 /// Maps a socket failure onto the handshake taxonomy.
@@ -1035,15 +1083,17 @@ mod tests {
     #[tokio::test]
     async fn a_plaintext_alert_is_reported_as_a_refusal() {
         let (mut client, mut server) = tokio::io::duplex(64);
+        // Xray sends a decode_error alert with the pre-negotiation 0x0301
+        // record version. It must be named as an alert, not a record version.
         server
-            .write_all(&[OUTER_ALERT, 3, 3, 0, 2, 2, 80])
+            .write_all(&[OUTER_ALERT, 3, 1, 0, 2, 2, 50])
             .await
             .expect("write");
         let mut scratch = Vec::new();
         assert!(matches!(
             read_record(&mut client, &mut scratch).await,
             Err(Error::Handshake(HandshakeError::Protocol(
-                "peer sent a plaintext alert"
+                "peer alert: decode_error"
             )))
         ));
     }

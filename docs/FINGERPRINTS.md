@@ -96,7 +96,35 @@ shapes are the class the server benchmarks; other shapes are correctness-safe
 but not promised to hit a warm prebuilt class. The class cache is bounded, so do
 not rotate profiles per connection.
 
+## Wire details that matter
+
+The initial handshake record uses the compatibility version `0x0301` (the
+handshake message inside still carries legacy version `0x0303`), matching both
+Chrome and Xray. `status_request` is the full five-byte OCSP form
+(`01 00 00 00 00`) and `psk_key_exchange_modes` is `0x002d`, not `0x2d00`.
+Those two factory-era defects made Xray answer with a fatal `decode_error`;
+the alert path now reports `peer alert: decode_error` instead of blaming the
+record version.
+
+The Chrome profile has 15 non-GREASE ciphers, 16 non-GREASE extensions and
+ALPN `h2`; its JA4 cipher hash is `8daaf6152771`, the value captured from the
+real Chrome/Xray client. `chrome_matches_the_captured_xray_ja4_cipher_hash`
+guards it.
+
 ## Configuration
+
+JSON, starting with v0.1.1:
+
+```json
+"realitySettings": {
+  "publicKey": "...",
+  "shortId": "abcd",
+  "serverName": "www.example.com",
+  "fingerprint": "chrome"
+}
+```
+
+Legacy TOML:
 
 ```toml
 [node.reality]
@@ -145,3 +173,8 @@ supported shapes against one node in one process. On the isolated v2.0.1
 fixture it passed 15/15. A completed handshake proves that the shape reached the
 REALITY path and negotiated a suite/group the hello offered; it does not prove
 that a middlebox sees an ordinary browser, and no such claim is made here.
+
+The same test was also run against an unmodified **Xray-core 26.7.28 server**
+(`5ca6f4b`) on loopback with a TLS 1.3 cover: 15/15 completed. That is the
+compatibility target the factory binary failed with `decode_error`; the
+regression tests above pin the two wire fixes that made it work.

@@ -145,6 +145,13 @@ The invariants above do not move with the shape:
   added when the profile declares it;
 - the transcript hashes the exact patched message.
 
+The initial handshake record uses record version `0x0301`, as Chrome and Xray
+do; the handshake message's own legacy version remains `0x0303`. A plaintext
+alert is read before the record-version check, because a server that rejects
+the hello may send a `0x0301` alert; the client reports the alert description
+(e.g. `peer alert: decode_error`) rather than a misleading record-version
+error.
+
 Profiles reproduce cipher suites, extension order, GREASE slots, Chrome's
 extension shuffle, BoringSSL padding, ALPS and ECH grease from the pinned uTLS
 source. Firefox's P-256 key share is deliberately omitted while P-256 remains in

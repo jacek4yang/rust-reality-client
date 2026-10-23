@@ -8,8 +8,9 @@ Tested local executable SHA-256:
 See [the evidence index](experiments/README.md) for raw data and controls.
 This is a candidate for a controlled rollout, not a universal production certificate.
 
-- [x] 395 offline tests in the current checkout; formatting, strict Clippy, Rust 1.85 MSRV.
+- [x] 397 offline tests in the current checkout; formatting, strict Clippy, Rust 1.85 MSRV.
 - [x] 23 pinned, unmodified v2.0.1 server interop tests; final-runtime CI verifies them.
+- [x] 15/15 supported fingerprints complete REALITY against an unmodified Xray 26.7.28 server.
 - [x] Windows offline tests, strict Clippy and MSRV; no Windows blackhole claim.
 - [x] Final 12 interleaved 120-second A/B runs; all application checks pass.
 - [x] Session-feedback, hedge and TCP user-timeout ablations; real Linux packet loss.
@@ -450,7 +451,7 @@ packet — is boxes 34 to 37, at the end of this list.
   ```
 
   ```text
-  unittests src\lib.rs      … 351 passed; 0 failed
+  unittests src\lib.rs      … 353 passed; 0 failed
   tests\cli.rs              … 23 passed; 0 failed
   tests\fault_injection.rs  … 8 passed; 0 failed
   tests\fuzz_smoke.rs       … 4 passed; 0 failed
@@ -461,7 +462,7 @@ packet — is boxes 34 to 37, at the end of this list.
   test result: ok.          … 0 failed
   ```
 
-  395 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
+  397 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
   on two platforms.
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
@@ -790,6 +791,34 @@ everything, and what each socket is proved to hold.
   REALITY acceptance — not full TLS record-layer or timing behaviour. The
   capture comparison runs offline in the normal test suite; the live node
   remains the interop authority.
+
+- [x] **39. The factory ClientHello wire defects are fixed, and the client
+  reports a real reject instead of inventing one.**
+
+  The released v0.1.1 hello had two concrete defects: `status_request` was five
+  bytes short (`[0,0]` instead of status_type 1 plus two zero lengths), and
+  `psk_key_exchange_modes` was written as `0x2d00` instead of `0x002d`. Xray
+  26.7.28 answers that hello with `15 03 01 00 02 02 32` — fatal
+  `decode_error` — while the older client looked only at the record version
+  0x0301 and reported `record version`, which sent the operator in the wrong
+  direction.
+
+  Regression coverage is
+  `the_two_factory_encoding_bugs_and_record_version_stay_fixed`: it asserts the
+  five-byte status body, the 0x002d/`[1,1]` PSK-modes extension, the absence of
+  0x2d00, and the initial record header `[22, 3, 1]`. The alert path is
+  `a_plaintext_alert_is_reported_as_a_refusal`: a 0x0301 record carrying
+  `decode_error` is now reported as `peer alert: decode_error`, not as a
+  record-version failure. The Chrome profile has 15 non-GREASE ciphers and 16
+  non-GREASE extensions, its ALPN is h2, and
+  `chrome_matches_the_captured_xray_ja4_cipher_hash` reproduces the captured
+  JA4 cipher hash `8daaf6152771`.
+
+  The fixed source was run against an unmodified **Xray 26.7.28 server** on
+  loopback (self-signed TLS 1.3 cover): all 15 supported fingerprints completed
+  a REALITY handshake, and the earlier factory failure did not recur. This is a
+  source fix; the already-published v0.1.1 artifact predates it and must be
+  rebuilt from a commit that contains this box.
 
 ---
 

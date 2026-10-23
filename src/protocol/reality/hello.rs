@@ -274,7 +274,9 @@ impl HelloRecord {
     #[must_use]
     pub fn record(&self) -> Vec<u8> {
         let mut record = Vec::with_capacity(RECORD_HEADER_LEN + self.message.len());
-        record.extend_from_slice(&[CONTENT_TYPE_HANDSHAKE, 3, 3]);
+        // Chrome and Xray write the initial ClientHello with the TLS 1.0
+        // record version; the handshake message itself still says TLS 1.2.
+        record.extend_from_slice(&[CONTENT_TYPE_HANDSHAKE, 3, 1]);
         record.extend_from_slice(&self.record_length.to_be_bytes());
         record.extend_from_slice(&self.message);
         record
@@ -671,7 +673,7 @@ mod tests {
     fn the_record_wraps_the_message_in_a_plaintext_handshake_header() {
         let (record, _, _) = hello();
         let bytes = record.record();
-        assert_eq!(Some(&[22_u8, 3, 3]), bytes.first_chunk::<3>());
+        assert_eq!(Some(&[22_u8, 3, 1]), bytes.first_chunk::<3>());
         let declared = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
         assert_eq!(record.message().len(), declared);
         assert_eq!(5 + declared, bytes.len());
