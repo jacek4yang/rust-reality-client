@@ -249,6 +249,7 @@ impl Node for Fake {
 fn tunnel(cost: Duration) -> Established<DuplexStream> {
     let (session, _peer) = tokio::io::duplex(64);
     Established {
+        completion: super::quality::Completion::untracked(),
         session,
         address: "127.0.0.1:44443"
             .parse()
@@ -1170,4 +1171,31 @@ serverName = "www.example.com"
     assert_eq!(scheduler.report().len(), 2);
     assert!(report.contains("edge-a") && report.contains("edge-b"));
     assert!(scheduler.report()[0].primary);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fast_handshakes_do_not_erase_repeated_session_protocol_failures() {
+    let (scheduler, _) = rig(vec![Spec::new(vec![]), Spec::new(vec![])], mandated());
+    seed(&scheduler, 0, Duration::from_millis(1));
+    seed(&scheduler, 1, Duration::from_millis(80));
+    let healthy_existing = scheduler.open(TARGET, 443).await.unwrap();
+    for _ in 0..3 {
+        let mut opened = scheduler.open(TARGET, 443).await.unwrap();
+        opened.completion.begin();
+        opened.completion.progress.tunnel.failed = Some("read");
+        opened.completion.finish(Some(&Error::Session(
+            crate::error::SessionError::RecordCorrupted,
+        )));
+    }
+    assert_eq!(scheduler.projection().lead(), Some(1));
+    // The setup health is still fast; it cannot clear a different failure class.
+    scheduler.shared.health[0].probe_open();
+    seed(&scheduler, 0, Duration::from_millis(1));
+    assert_eq!(scheduler.projection().lead(), Some(1));
+    assert_eq!(healthy_existing.family, AddressFamily::Ipv4);
+    assert_eq!(
+        scheduler.report()[0].health.failures,
+        0,
+        "session cost is not a setup breaker"
+    );
 }

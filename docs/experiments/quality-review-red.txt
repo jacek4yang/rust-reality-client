@@ -1,0 +1,37 @@
+running 10 tests
+test scheduler::quality::tests::cancellation_settles_once_and_unused_hedge_winner_settles_nothing ... ok
+test scheduler::quality::tests::local_resets_remote_resets_and_normal_eof_are_not_node_convictions ... ok
+test scheduler::quality::tests::protocol_attribution_requires_a_tunnel_read_not_a_local_encoder_failure ... ok
+test scheduler::quality::tests::repeated_protocol_faults_cost_but_do_not_ban_and_expire ... ok
+test scheduler::quality::tests::old_faults_expire_even_when_short_successes_keep_arriving ... FAILED
+test scheduler::quality::tests::short_success_does_not_clear_a_fault_class_and_healthy_v6_is_not_penalized ... ok
+test scheduler::quality::tests::unknown_alternate_family_is_not_a_proven_healthy_escape ... FAILED
+test scheduler::quality::tests::real_session_recovery_ignores_late_pre_recovery_faults ... ok
+test scheduler::quality::tests::shared_destination_failures_do_not_disable_every_entry ... ok
+test scheduler::quality::tests::concurrent_completions_are_bounded_and_counted ... ok
+
+failures:
+
+---- scheduler::quality::tests::old_faults_expire_even_when_short_successes_keep_arriving stdout ----
+
+thread 'scheduler::quality::tests::old_faults_expire_even_when_short_successes_keep_arriving' (1449) panicked at src/scheduler/quality.rs:414:9:
+assertion `left == right` failed: one fresh fault must not inherit indefinitely old strikes
+  left: 500
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- scheduler::quality::tests::unknown_alternate_family_is_not_a_proven_healthy_escape stdout ----
+
+thread 'scheduler::quality::tests::unknown_alternate_family_is_not_a_proven_healthy_escape' (1455) panicked at src/scheduler/quality.rs:422:9:
+assertion `left == right` failed: ambiguous completion cannot clear a different failure class
+  left: 0
+ right: 500
+
+
+failures:
+    scheduler::quality::tests::old_faults_expire_even_when_short_successes_keep_arriving
+    scheduler::quality::tests::unknown_alternate_family_is_not_a_proven_healthy_escape
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 312 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

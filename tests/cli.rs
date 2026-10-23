@@ -470,3 +470,162 @@ serverName = "www.example.com"
          before anything connected"
     );
 }
+
+#[test]
+fn json_is_the_stdout_template_and_roundtrips() {
+    let output = run(&["generate"]);
+    assert_eq!(code(&output), 0);
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let id = v["outbounds"][0]["settings"]["id"].as_str().unwrap();
+    assert_eq!(id.len(), 36);
+    assert_eq!(&id[14..15], "4");
+    let p = write(
+        "json-default.json",
+        std::str::from_utf8(&output.stdout).unwrap(),
+    );
+    assert_eq!(code(&run(&["check", "-c", &shown(&p)])), 0);
+    let diag = said(&run(&["check", "-c", &shown(&p)]));
+    assert!(!diag.contains(id));
+}
+#[test]
+fn explicit_formats_and_extensions_must_agree() {
+    let p = scratch("format-conflict.json");
+    assert_eq!(
+        code(&run(&["generate", "--format", "toml", "--out", &shown(&p)])),
+        2
+    );
+    let out = run(&["generate", "--format", "toml"]);
+    assert_eq!(code(&out), 0);
+    assert!(String::from_utf8(out.stdout).unwrap().contains("[[node]]"));
+}
+#[test]
+fn migrate_preserves_identity_and_refuses_overwrite() {
+    let input = template("migration-input.toml");
+    let output = scratch("migration-output.json");
+    let _ = std::fs::remove_file(&output);
+    assert_eq!(
+        code(&run(&[
+            "migrate",
+            "-c",
+            &shown(&input),
+            "--out",
+            &shown(&output)
+        ])),
+        0
+    );
+    let old =
+        rust_reality_client::config::parse_toml(&std::fs::read_to_string(input).unwrap()).unwrap();
+    let bytes = std::fs::read_to_string(&output).unwrap();
+    let new = rust_reality_client::config::parse_json(&bytes).unwrap();
+    assert_eq!(old, new);
+    assert_eq!(
+        code(&run(&[
+            "migrate",
+            "-c",
+            &shown(&output),
+            "--out",
+            &shown(&output)
+        ])),
+        1
+    );
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+#[test]
+fn default_prefers_json_and_only_missing_json_falls_back_to_toml() {
+    let directory = scratch("default-config-dir");
+    std::fs::create_dir_all(&directory).unwrap();
+    let _ = std::fs::remove_file(directory.join("client.json"));
+    std::fs::write(
+        directory.join("client.toml"),
+        include_str!("../examples/client.toml"),
+    )
+    .unwrap();
+    assert_eq!(
+        code(
+            &binary()
+                .arg("check")
+                .current_dir(&directory)
+                .output()
+                .unwrap()
+        ),
+        0
+    );
+    std::fs::write(directory.join("client.json"), "{broken}").unwrap();
+    let output = binary()
+        .arg("check")
+        .current_dir(&directory)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 2);
+    assert!(said(&output).contains("JSON"));
+    std::fs::write(
+        directory.join("client.json"),
+        include_str!("../examples/client.json"),
+    )
+    .unwrap();
+    std::fs::write(directory.join("client.toml"), "invalid").unwrap();
+    assert_eq!(
+        code(
+            &binary()
+                .arg("check")
+                .current_dir(&directory)
+                .output()
+                .unwrap()
+        ),
+        0
+    );
+    assert_eq!(
+        code(
+            &binary()
+                .args(["check", "-c", "missing.json"])
+                .current_dir(&directory)
+                .output()
+                .unwrap()
+        ),
+        2
+    );
+}
+#[test]
+fn json_syntax_errors_do_not_echo_credentials() {
+    let p = write(
+        "secret-bad.json",
+        "{\"outbounds\":[{\"id\": secret-token}]}",
+    );
+    let output = run(&["check", "-c", &shown(&p)]);
+    assert_eq!(code(&output), 2);
+    assert!(!said(&output).contains("secret-token"));
+}
+#[test]
+fn json_and_toml_extensions_are_not_silently_reinterpreted() {
+    let p = write("wrong-format.json", include_str!("../examples/client.toml"));
+    assert_eq!(code(&run(&["check", "-c", &shown(&p)])), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_json_symlink_does_not_fall_back_to_toml() {
+    let directory = scratch("dangling-json-dir");
+    std::fs::create_dir_all(&directory).unwrap();
+    let _ = std::fs::remove_file(directory.join("client.json"));
+    std::os::unix::fs::symlink("missing-target", directory.join("client.json")).unwrap();
+    std::fs::write(
+        directory.join("client.toml"),
+        include_str!("../examples/client.toml"),
+    )
+    .unwrap();
+    let output = binary()
+        .arg("check")
+        .current_dir(directory)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 2);
+    assert!(said(&output).contains("client.json"));
+}

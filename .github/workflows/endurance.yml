@@ -1,0 +1,92 @@
+name: Five-hour packaged endurance
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/endurance.yml
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: five-hour-endurance-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  endurance:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-gnu
+            sha256: 25943d0e088c54d4f71f49107154cd9349669c1097d27e339c52b7f760995ed1
+          - name: x86_64-musl
+            sha256: bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: 1.96.0
+          components: ""
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rust-reality-client-${{ matrix.name }}
+          run-id: 37182730520
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Verify the exact previously accepted package and runtime source
+        env:
+          NAME: ${{ matrix.name }}
+          EXPECTED_SHA: ${{ matrix.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/unpacked
+          tar -xzf candidate/*-$NAME.tar.gz -C candidate/unpacked --strip-components=1
+          test "$(cat candidate/unpacked/SOURCE_COMMIT)" = d2a6cceb0318ae7ee069d5d7b852fd900e773087
+          echo "$EXPECTED_SHA  candidate/unpacked/rust-reality-client" | sha256sum --check --strict
+          python3 - <<'PY'
+          import json, hashlib, subprocess
+          from pathlib import Path
+          expected = json.loads(Path('docs/experiments/release-runtime.json').read_text())['files']
+          paths = subprocess.check_output(['git','ls-files','-z','src','Cargo.toml','Cargo.lock']).decode().split('\0')
+          actual = {p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths if p}
+          assert actual == expected, 'runtime differs from accepted binaries'
+          PY
+      - name: Build the pinned unmodified server and install fixture dependency
+        run: |
+          git clone --quiet https://github.com/jacek4yang/rust-reality "$RUNNER_TEMP/v201"
+          git -C "$RUNNER_TEMP/v201" checkout --detach e3fc3dc36b931baec042074d6c88e928caf6941f
+          cargo +1.96.0 build --release --locked --manifest-path "$RUNNER_TEMP/v201/Cargo.toml" --bin rust-reality
+          python3 -m venv target/venv
+          target/venv/bin/pip install websockets==15.0.1
+      - name: Complete 18000 real seconds of mixed application and recovery traffic
+        run: |
+          export INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality"
+          target/venv/bin/python scripts/interop/application_soak.py \
+            --binary "$PWD/candidate/unpacked/rust-reality-client" \
+            --seconds 18000 --handoff --with-recovery --terminate-node \
+            --output target/endurance > target/endurance-console.log 2>&1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('target/endurance/report.json').read_text())
+          assert report['passed'] and report['wall_seconds'] >= 18000
+          print(json.dumps({k:report[k] for k in ('passed','wall_seconds','binary_sha256','workloads','after_drain','node_termination')},indent=2))
+          PY
+      - name: Collect only secret-free evidence, including interrupted progress
+        if: always()
+        run: |
+          mkdir -p endurance-evidence
+          for file in report.json progress.json samples.jsonl; do
+            if test -f "target/endurance/$file"; then cp "target/endurance/$file" endurance-evidence/; fi
+          done
+          git rev-parse HEAD > endurance-evidence/harness-commit.txt
+          uname -a > endurance-evidence/kernel.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: five-hour-endurance-${{ matrix.name }}
+          path: endurance-evidence/
+          if-no-files-found: error
+          retention-days: 30

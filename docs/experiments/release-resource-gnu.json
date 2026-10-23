@@ -1,0 +1,96 @@
+{
+  "passed": true,
+  "started_utc": "2026-10-04T06:14:24.789482+00:00",
+  "binary_sha256": "e609ccfe3641b059da5a68c3c93f2af48564553a3fa8f564551ef0d1a15aba4a",
+  "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+  "cases": {
+    "normal": {
+      "baseline": {
+        "monotonic": 9898.329002573,
+        "rss_kib": 3232,
+        "fds": 11,
+        "threads": 10,
+        "cpu_seconds": 0.0
+      },
+      "malformed_refusals": 1000,
+      "unfinished_head_seconds": [
+        15.001785366999684,
+        15.002894625999033
+      ],
+      "parked_attempts_connected": 1150,
+      "pressure": {
+        "monotonic": 9914.64569818,
+        "rss_kib": 7576,
+        "fds": 268,
+        "threads": 10,
+        "cpu_seconds": 0.24
+      },
+      "recovered": {
+        "monotonic": 9914.668633094,
+        "rss_kib": 7636,
+        "fds": 13,
+        "threads": 10,
+        "cpu_seconds": 0.25
+      },
+      "stop_seconds": 10.051202655000452,
+      "final_resources": {
+        "timestampUnixMs": 1791094492147,
+        "level": "debug",
+        "event": "resources",
+        "active": 0,
+        "trackedHighWater": 287,
+        "connectionsAvailable": 256,
+        "handshakesAvailable": 32,
+        "probesAvailable": 4,
+        "sparesAvailable": 16,
+        "accepted": 2156,
+        "carried": 2,
+        "failed": 895,
+        "panicked": 0,
+        "cancelled": 1
+      }
+    },
+    "descriptor-pressure": {
+      "baseline": {
+        "monotonic": 9924.82831151,
+        "rss_kib": 3144,
+        "fds": 11,
+        "threads": 10,
+        "cpu_seconds": 0.0
+      },
+      "pressure": {
+        "monotonic": 9926.940500913,
+        "rss_kib": 4708,
+        "fds": 128,
+        "threads": 10,
+        "cpu_seconds": 0.01
+      },
+      "pressure_cpu_seconds": 0.0,
+      "recovered": {
+        "monotonic": 9928.957991656,
+        "rss_kib": 4892,
+        "fds": 13,
+        "threads": 10,
+        "cpu_seconds": 0.04
+      },
+      "stop_seconds": 10.049681653999869,
+      "final_resources": {
+        "timestampUnixMs": 1791094506435,
+        "level": "debug",
+        "event": "resources",
+        "active": 0,
+        "trackedHighWater": 117,
+        "connectionsAvailable": 256,
+        "handshakesAvailable": 32,
+        "probesAvailable": 4,
+        "sparesAvailable": 16,
+        "accepted": 184,
+        "carried": 2,
+        "failed": 0,
+        "panicked": 0,
+        "cancelled": 1
+      }
+    }
+  },
+  "finished_utc": "2026-10-04T06:15:06.501343+00:00"
+}

@@ -7,15 +7,15 @@ built around one goal: fewer `Connection error` events, fewer stalls, and no
 route switching that TCP does not actually allow.
 
 ```bash
-rust-reality-client generate --out client.toml   # writes a commented file with a real user id
-$EDITOR client.toml                              # address, publicKey, shortId from your node
-rust-reality-client check  --config client.toml  # every problem in the file, at once
-rust-reality-client doctor --config client.toml  # is it reachable, and who is at fault if not
-rust-reality-client run    --config client.toml  # SOCKS5 127.0.0.1:10808, HTTP 127.0.0.1:10809
+rust-reality-client generate --out client.json   # writes primary JSON; match the existing server UUID
+$EDITOR client.json                              # address, publicKey, shortId from your node
+rust-reality-client check  --config client.json  # every problem in the file, at once
+rust-reality-client doctor --config client.json  # is it reachable, and who is at fault if not
+rust-reality-client run    --config client.json  # SOCKS5 127.0.0.1:10808, HTTP 127.0.0.1:10809
 ```
 
-No Xray process, no Go runtime, no shared library: one static-ish binary and one
-TOML file. The server is not modified, configured differently, or restarted.
+No Xray process or Go runtime: one native executable and one JSON file (legacy TOML remains supported).
+The Linux musl artifact is static; GNU artifacts require the platform C runtime. The server is not modified, configured differently, or restarted.
 
 ---
 
@@ -115,7 +115,7 @@ has no type that could retry it elsewhere.
 ## 4. Installation
 
 **From a release artifact.** Each release carries one archive per target, each
-with the binary, this README, `examples/client.toml` and a `VERSION` file:
+with the binary, this README, `client.json`, legacy `client.toml` and a `VERSION` file:
 
 ```text
 rust-reality-client-<tag>-x86_64-gnu.tar.gz
@@ -150,50 +150,51 @@ Raspberry Pi OS of current vintage, the `aarch64-gnu` artifact is the one to use
 
 ## 5. Configuration
 
+**JSON is the primary format starting with v0.1.1. v0.1.0 uses TOML. Legacy
+TOML remains supported; old release files and endurance evidence are unchanged.**
+
 ```bash
-rust-reality-client generate --out client.toml
+rust-reality-client generate --out client.json
+rust-reality-client check --config client.json
+rust-reality-client doctor --config client.json
+rust-reality-client run --config client.json
+# Existing installations: preserve the exact validated credentials and listeners.
+rust-reality-client migrate --config client.toml --out client.json
 ```
 
-`generate` draws a fresh UUID v4 from the OS CSPRNG rather than leaving you a
-placeholder, because a copied user id is a silent collision with another node.
-The shape:
+The shape follows Xray's `inbounds` / `outbounds`, flat VLESS `settings`, and
+`streamSettings.realitySettings`, while remaining specific to rust-reality.
+See [the complete JSON example](examples/client.json) and
+[JSON configuration and migration](docs/CONFIGURATION.md).
 
-```toml
-[listen]
-socks5 = "127.0.0.1:10808"       # "" disables this edge
-http = "127.0.0.1:10809"
-# allowRemote = false            # anything off loopback needs this set on purpose
+- `inbounds`: one `socks` (SOCKS5 CONNECT) and/or one `http` (CONNECT only).
+  Omitted `listen` is **loopback**, not all interfaces. Non-loopback requires
+  explicit top-level `allowRemote: true`; inbound authentication is unsupported.
+- `outbounds`: every VLESS entry participates in the existing automatic node
+  selection pool. **Unlike Xray, the first outbound is not a fixed default.**
+- `settings`: `address`, `port`, `id` (the server's hyphenated UUID), optionally
+  explicit `encryption: "none"` and `flow: "xtls-rprx-vision"`.
+- `streamSettings`: `method: "raw"`, `security: "reality"`, then `realitySettings`
+  containing `publicKey`, `shortId`, `serverName`, and optional `fingerprint`
+  (`chrome` by default; the supported names are in
+  [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md)). `network: "tcp"` / `"raw"`
+  and REALITY `password` are supported alternative spellings; alias pairs
+  cannot appear together.
+- This is an **Xray-style subset, not an Xray configuration importer**. Routing,
+  DNS settings, Mux, UDP and other transports are rejected.
+  Legacy `vnext` / `users` must be flattened manually; they are not discarded.
+- Strict JSON: no comments, trailing commas, duplicate keys or unknown fields.
+  Errors identify positions/paths without printing credential values.
+- With no `--config`, `client.json` is preferred. Only if it does not exist is
+  `client.toml` tried. Invalid JSON **never** silently falls back to TOML.
+- Explicit `.json` / `.toml` paths enforce their format. Other suffixes use
+  content detection. `generate --format toml` or `--out client.toml` preserves
+  the old template option. Migration writes a **new** file and never overwrites;
+  Unix creates it with mode 0600. Windows uses the directory's inherited ACL.
 
-[[node]]
-name = "home-entry"
-address = "www.example.com"
-port = 443
-userId = "…"                     # the node's user id: an authentication credential
-
-[node.reality]
-publicKey = "…"                  # URL-safe unpadded base64, exactly 32 bytes
-shortId = "abcd"                 # 2–16 hex characters, even count
-serverName = "www.example.com"   # the SNI the cover answers to
-```
-
-Rules the parser enforces, each with a message naming the path and never the
-value:
-
-* `[listen]` addresses must be numeric (`127.0.0.1:10808`, `[::1]:10808`) and
-  the port may not be `0`.
-* A non-loopback bind is refused unless `allowRemote = true`.
-* `publicKey` must decode to exactly 32 bytes; `shortId` must be even-length hex
-  of 2–16 characters; `userId` must be a canonical hyphenated UUID.
-* `[[node]]` is an array of tables; at least one is required, and duplicates are
-  reported rather than silently merged.
-* Every problem in the file is reported in one pass, so `check` is a work list
-  and not a lottery.
-* Keys Xray uses (`pbk`, `sni`, `sid`, `fp`, `flow`) are refused as written
-  with the equivalent in this grammar; `fp` points at `fingerprint`, and a
-  migrated file is the most likely way to arrive here with a wrong shape.
-
-Leaving `[listen]` out entirely gives the mandated `127.0.0.1:10808` /
-`127.0.0.1:10809` pair.
+`generate` creates a new random UUID. For an existing server, replace it with
+that server's UUID owning the supplied short ID; generation does not register
+an account on the server. Never copy a private key into the public-key field.
 
 ## 6. SOCKS5 usage
 
@@ -410,20 +411,21 @@ the node's own 120 s write-stall bound (`src/io_activity.rs:14` upstream), so th
 client learns a peer is gone from its own socket rather than losing that race, and a
 test asserts both the arithmetic and the inequality.
 
-Tolerance is a separate number and it is not a duration. An outage that swallowed one
+The earlier keepalive-only measurements below are historical. Tolerance also depends
+on outage timing and peer policy. An outage that swallowed one
 probe slot was survived; an outage that covered all three slots killed the session
 **even after connectivity returned**, because both ends had already been told the
 socket was dead. A socket that is *carrying* bytes is not subject to that at all — a
 5 s outage in the middle of a 1 MiB write cost 6.5 s and the transfer completed on
-retransmission alone. Deliberately absent:
+retransmission alone. Current policy:
 
-* **No `TCP_USER_TIMEOUT`.** This is not because it endangers quiet connections:
-  per `tcp(7)` it bounds data left unacknowledged or untransmitted behind a zero
-  window, so a quiet socket with an empty send queue cannot trigger it. It is
-  because on a socket that *does* have a pending write it "will override keepalive",
-  which would replace the 59 s verdict above with a shorter one — and two of the six
-  measured runs are connections that trade would have broken. Unarmed, and no global
-  default touched.
+* **A 60 s per-socket `TCP_USER_TIMEOUT` on Linux/Android.** Actual packet-loss
+  experiments exposed the gap in keepalive-only handling when data is outstanding.
+  The Linux control detected an idle blackhole in 60.99 s and a writing blackhole
+  in 78.52 s, while 5/20/40 s transient outages recovered with byte-exact payloads.
+  This is a kernel pending-data bound, not an application read-idle deadline or
+  an exact sixty-second wall-clock promise. Windows retains keepalive; this
+  pending-data bound is not claimed there. See [experiment evidence](docs/experiments/README.md).
 * **No userspace read-idle timeout for healthy authenticated connections.** A quiet
   tunnel is a working tunnel. An idle SSE stream is left alone for as long as it
   stays quiet, and only the kernel probes decide whether it is alive.
@@ -438,6 +440,23 @@ without cutting the reverse direction, and the node's `close_notify` reads as en
 stream rather than as an error. A WebSocket `Ping`, `Pong` or `Close` is payload to
 this proxy — carried byte for byte, never generated on the application's behalf, and
 never taken as proof that the service behind the node is healthy.
+
+### Established-session feedback
+
+The scheduler also receives one terminal observation per adopted session. Writer
+acceptance counts survive errors and cancellation; they do not prove delivery.
+Logs keep node index, family, setup/session age, direction/operation and cause,
+without application content or credentials. Cancellation, local shutdown, normal
+EOF and ambiguous remote resets do not become entry-node convictions.
+
+Three tunnel-read protocol defects within five minutes add a bounded 500 ms
+selection cost for thirty seconds. This never bans a route or affects a live
+stream. Costs remain family-specific; a recently successful alternate family
+is not charged. Unknown completion is not proof that an alternate family works.
+A healthy bidirectional session lasting thirty seconds can clear its family's
+cost; a handshake probe cannot. Late pre-recovery observations cannot re-poison
+that recovery. This is not a detector of encrypted HTTP errors, provider rate
+limits, or a cure for shared LANDING failures.
 
 ## 14. Diagnostics
 
@@ -638,14 +657,18 @@ Out of scope for v1, deliberately, and not "not yet":
 
 Known rough edges worth naming:
 
-* A session that stays **quiet** through an outage covering all three probe slots —
-  about 40 s of the armed 30/10/3 window — is lost even when the path heals inside a
-  minute, because both ends' kernels have already been told the socket is dead
-  (section 13). A session that is *carrying* bytes does not have that failure: the
-  same length outage during a bulk write cost 6.5 s and the transfer completed.
-  Raising the tolerance means raising `KEEPALIVE_COUNT` or `_INTERVAL`, which slows
-  blackhole detection by the same amount, and that trade is measured rather than
-  guessed at.
+* The pinned v2.0.1 server waits for five destination bytes (or EOF) when
+  classifying the first downlink. A three-byte raw echo response on a connection
+  that stays open stalls through both this client and stock Xray, but succeeds
+  without the proxy. This server limitation is not fixed by changing clients;
+  TLS/WSS/SSE acceptance does not establish arbitrary tiny raw-TCP behavior.
+
+* Outage tolerance depends on timing, pending data, peer policy and the kernel.
+  The current Linux tests recover from the tested 5/20/40-second outages; that
+  does not guarantee recovery from every outage of the same length. Once either
+  peer closes a socket, the application must open a new connection. The earlier
+  keepalive-only probe-slot experiment is retained as historical evidence in
+  Operations, not as a prediction of the updated pending-data policy.
 * One `userId` per node, because that is what the file shape describes.
 * `doctor` cannot distinguish clock skew from a wrong key or short id on a failed
   handshake — it says so rather than guessing (section 14).

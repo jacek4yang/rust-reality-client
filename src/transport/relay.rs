@@ -42,8 +42,10 @@
 //! time this module is running, the pair of sockets is the connection.
 
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional_with_sizes};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
 
 use crate::error::{Error, TransportError};
 
@@ -101,6 +103,116 @@ where
     })
 }
 
+/// Progress retained even when a relay errors or its future is cancelled.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// Observations at the application's socket.
+    pub local: Edge,
+    /// Observations at the tunnel's socket.
+    pub tunnel: Edge,
+}
+
+/// Small, payload-free observations at one edge.
+#[derive(Debug, Default)]
+pub struct Edge {
+    /// Bytes accepted by this writer; not proof of remote delivery.
+    pub written: u64,
+    /// The first failing operation at this edge.
+    pub failed: Option<&'static str>,
+}
+
+impl Progress {
+    /// Counts bytes accepted by each writer, including before failure.
+    #[must_use]
+    pub const fn transferred(&self) -> Transferred {
+        Transferred {
+            to_remote: self.tunnel.written,
+            to_local: self.local.written,
+        }
+    }
+}
+
+struct Observed<'a, S> {
+    stream: &'a mut S,
+    edge: &'a mut Edge,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Observed<'_, S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("read");
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Observed<'_, S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_write(cx, buf);
+        match &result {
+            Poll::Ready(Ok(count)) => {
+                this.edge.written = this.edge.written.saturating_add(*count as u64);
+            }
+            Poll::Ready(Err(_)) => {
+                this.edge.failed.get_or_insert("write");
+            }
+            Poll::Pending => {}
+        }
+        result
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_flush(cx);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("flush");
+        }
+        result
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_shutdown(cx);
+        if matches!(result, Poll::Ready(Err(_))) {
+            this.edge.failed.get_or_insert("shutdown");
+        }
+        result
+    }
+}
+
+/// The same bounded Tokio relay, with error/cancellation-safe progress.
+///
+/// # Errors
+/// Returns the first relay error, without discarding the observations in `progress`.
+pub async fn carry_observed<L, R>(
+    local: &mut L,
+    remote: &mut R,
+    progress: &mut Progress,
+) -> Result<Transferred, io::Error>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut local = Observed {
+        stream: local,
+        edge: &mut progress.local,
+    };
+    let mut remote = Observed {
+        stream: remote,
+        edge: &mut progress.tunnel,
+    };
+    carry(&mut local, &mut remote).await
+}
+
 /// Decides what a failed relay means.
 ///
 /// [`carry`] can only report an [`io::Error`], so the taxonomy comes from the one
@@ -137,6 +249,73 @@ mod tests {
 
     use super::*;
     use crate::error::{Failure, SessionError};
+
+    struct FailsAfter {
+        left: usize,
+    }
+
+    impl AsyncRead for FailsAfter {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+    impl AsyncWrite for FailsAfter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.left == 0 {
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+            }
+            let count = bytes.len().min(self.left);
+            self.left -= count;
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_preserves_partial_write_counts_and_edge() {
+        let (mut app, mut local) = tokio::io::duplex(64);
+        app.write_all(b"twelve bytes").await.unwrap();
+        let mut progress = Progress::default();
+        let error = carry_observed(&mut local, &mut FailsAfter { left: 7 }, &mut progress)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(progress.transferred().to_remote, 7);
+        assert_eq!(progress.tunnel.failed, Some("write"));
+        assert_eq!(progress.local.failed, None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_backpressure_preserves_counts_without_fabricating_failure() {
+        let (mut app, mut local) = tokio::io::duplex(64);
+        let (mut remote, _unread_peer) = tokio::io::duplex(4);
+        app.write_all(b"twelve bytes").await.unwrap();
+        let mut progress = Progress::default();
+        assert!(
+            time::timeout(
+                Duration::from_millis(20),
+                carry_observed(&mut local, &mut remote, &mut progress)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(progress.transferred().to_remote, 4);
+        assert_eq!(progress.local.failed, None);
+        assert_eq!(progress.tunnel.failed, None);
+    }
 
     /// The four sockets of one proxied connection: an application and an origin
     /// at the two ends, and the halves the relay holds between them.

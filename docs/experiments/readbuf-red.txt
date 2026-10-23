@@ -1,0 +1,24 @@
+   Compiling rust-reality-client v0.1.0 (/workspace/scratch/ec6fd9be5eb1/rust-reality-client/target/deep-optimization)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s
+     Running unittests src/lib.rs (target/debug/deps/rust_reality_client-de40d742ee37e0d7)
+
+running 2 tests
+
+thread 'transport::session::tests::a_zero_capacity_direct_read_does_not_fabricate_peer_eof' (293) panicked at src/transport/session.rs:1246:9:
+no capacity is not peer EOF
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test transport::session::tests::a_zero_capacity_direct_read_does_not_fabricate_peer_eof ... FAILED
+
+thread 'transport::session::tests::a_zero_capacity_framed_read_is_immediate_without_consuming_wire' (294) panicked at src/transport/session.rs:1256:20:
+an empty read must not wait for a TLS record: Elapsed(())
+test transport::session::tests::a_zero_capacity_framed_read_is_immediate_without_consuming_wire ... FAILED
+
+failures:
+
+failures:
+    transport::session::tests::a_zero_capacity_direct_read_does_not_fabricate_peer_eof
+    transport::session::tests::a_zero_capacity_framed_read_is_immediate_without_consuming_wire
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 324 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `--lib`

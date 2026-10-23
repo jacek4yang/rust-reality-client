@@ -1,0 +1,111 @@
+{
+  "run": "https://github.com/jacek4yang/rust-reality-client/actions/runs/37148161890",
+  "job": 111276262687,
+  "source": "7bff5762056727d5a5a08df6149344cede5f1b71",
+  "cases": {
+    "2-write-transient": {
+      "xray_matched_timers": true,
+      "case": "write-transient",
+      "implementation": "xray",
+      "censored": false,
+      "detected": false,
+      "recovered": true,
+      "restore_seconds": 40,
+      "elapsed_seconds": 52.504441998000004,
+      "bytes_received": 8388608,
+      "writer_observation": [
+        "accepted"
+      ]
+    },
+    "1-idle-blackhole": {
+      "xray_matched_timers": true,
+      "case": "idle-blackhole",
+      "implementation": "xray",
+      "censored": false,
+      "detected": true,
+      "recovered": false,
+      "restore_seconds": null,
+      "terminal": "EOF",
+      "elapsed_seconds": 61.04506038699998,
+      "bytes_received": 0,
+      "writer_observation": []
+    },
+    "1-idle-transient": {
+      "xray_matched_timers": true,
+      "case": "idle-transient",
+      "implementation": "xray",
+      "censored": false,
+      "detected": false,
+      "recovered": true,
+      "restore_seconds": 40,
+      "elapsed_seconds": 40.024988213,
+      "bytes_received": 14,
+      "writer_observation": []
+    },
+    "1-write-blackhole": {
+      "xray_matched_timers": true,
+      "case": "write-blackhole",
+      "implementation": "xray",
+      "censored": false,
+      "detected": true,
+      "recovered": false,
+      "restore_seconds": null,
+      "terminal": "EOF",
+      "elapsed_seconds": 78.528220153,
+      "bytes_received": 0,
+      "writer_observation": []
+    },
+    "2-idle-transient": {
+      "xray_matched_timers": true,
+      "case": "idle-transient",
+      "implementation": "xray",
+      "censored": false,
+      "detected": false,
+      "recovered": true,
+      "restore_seconds": 40,
+      "elapsed_seconds": 40.10058853999999,
+      "bytes_received": 14,
+      "writer_observation": []
+    },
+    "2-write-blackhole": {
+      "xray_matched_timers": true,
+      "case": "write-blackhole",
+      "implementation": "xray",
+      "censored": false,
+      "detected": true,
+      "recovered": false,
+      "restore_seconds": null,
+      "terminal": "ConnectionResetError",
+      "elapsed_seconds": 78.529201962,
+      "bytes_received": 0,
+      "writer_observation": []
+    },
+    "2-idle-blackhole": {
+      "xray_matched_timers": true,
+      "case": "idle-blackhole",
+      "implementation": "xray",
+      "censored": false,
+      "detected": true,
+      "recovered": false,
+      "restore_seconds": null,
+      "terminal": "EOF",
+      "elapsed_seconds": 61.041824081000016,
+      "bytes_received": 0,
+      "writer_observation": []
+    },
+    "1-write-transient": {
+      "xray_matched_timers": true,
+      "case": "write-transient",
+      "implementation": "xray",
+      "censored": false,
+      "detected": false,
+      "recovered": true,
+      "restore_seconds": 40,
+      "elapsed_seconds": 52.56882386999999,
+      "bytes_received": 8388608,
+      "writer_observation": [
+        "accepted"
+      ]
+    }
+  }
+}

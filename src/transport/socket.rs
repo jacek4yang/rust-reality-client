@@ -53,6 +53,13 @@ pub const KEEPALIVE_COUNT: u32 = 3;
 /// what keeps a misconfigured budget a slowdown instead of an error.
 const MINIMUM_WINDOW: Duration = Duration::from_secs(1);
 
+/// Bound unacknowledged or zero-window data on Linux/Android data sockets.
+///
+/// This is not a read-idle timeout. Healthy quiet connections remain open.
+/// The kernel checks it on its own retransmission/probe schedule, so observed
+/// termination is not promised at exactly sixty wall-clock seconds.
+pub const USER_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Anything this module can borrow a socket handle from.
 ///
 /// The handle trait is platform-specific — `AsFd` on Unix, `AsSocket` on
@@ -94,7 +101,10 @@ pub fn configure<S: SocketHandle>(stream: &S) -> io::Result<()> {
         KEEPALIVE_IDLE,
         KEEPALIVE_INTERVAL,
         KEEPALIVE_COUNT,
-    ))
+    ))?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    socket.set_tcp_user_timeout(Some(USER_TIMEOUT))?;
+    Ok(())
 }
 
 /// What a live socket reports back about the options [`configure`] asked for.
@@ -123,6 +133,8 @@ pub struct Applied {
     /// Unanswered probes before the kernel gives up, where the platform exposes
     /// it.
     pub retries: Option<u32>,
+    /// The pending-data bound, where supported and enabled; never guessed on Windows.
+    pub user_timeout: Option<Duration>,
 }
 
 /// Reads the options back off a live socket.
@@ -159,6 +171,10 @@ pub fn probe<S: SocketHandle>(stream: &S) -> io::Result<Applied> {
         applied.interval = socket.tcp_keepalive_interval().ok();
     }
     applied.retries = socket.tcp_keepalive_retries().ok();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        applied.user_timeout = socket.tcp_user_timeout().ok().flatten();
+    }
     Ok(applied)
 }
 
@@ -181,6 +197,20 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
 
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn pending_data_bound_is_read_back_from_the_kernel() {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .unwrap();
+        assert_eq!(socket.tcp_user_timeout().unwrap(), None);
+        configure(&socket).unwrap();
+        assert_eq!(probe(&socket).unwrap().user_timeout, Some(USER_TIMEOUT));
+    }
 
     #[test]
     fn the_window_is_the_60_seconds_the_server_outlives() {

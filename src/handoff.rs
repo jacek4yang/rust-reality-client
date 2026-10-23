@@ -150,6 +150,7 @@ impl Handoff {
         };
 
         Ok(Established {
+            completion: crate::scheduler::quality::Completion::untracked(),
             session,
             address,
             family,
@@ -282,6 +283,8 @@ impl Handoff {
 /// argument, and the spelling `Established` used everywhere else is the real tunnel.
 #[derive(Debug)]
 pub struct Established<S = VisionSession<TcpStream>> {
+    /// Unique completion owner; unadopted hedge losers produce no session verdict.
+    pub completion: crate::scheduler::quality::Completion,
     /// The live tunnel. Dropping it closes the path.
     pub session: S,
     /// The address that answered, which the resolver may have reordered and the race

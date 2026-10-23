@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use base64::Engine as _;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use rust_reality_client::config::{Config, Node};
 use rust_reality_client::entropy;
@@ -36,7 +36,7 @@ use rust_reality_client::serve::{self, Server, StartError};
 use rust_reality_client::transport::{Dial, DialPolicy, Environment, Tuning};
 
 /// The file `--config` reads when the operator says nothing.
-const DEFAULT_CONFIG: &str = "client.toml";
+const DEFAULT_CONFIG: &str = "client.json";
 /// The user id in the template, replaced by a fresh one on `generate`.
 const TEMPLATE_USER_ID: &str = "00000000-0000-4000-8000-000000000000";
 /// The public key in the template: 32 zero bytes, which no node can hold, so that
@@ -72,21 +72,21 @@ struct Cli {
 enum Command {
     /// Serve on the configured listeners until a signal asks for a stop.
     Run {
-        /// The configuration file.
-        #[arg(long, short, default_value = DEFAULT_CONFIG, value_name = "PATH")]
-        config: PathBuf,
+        /// Config file; default client.json, or client.toml only when JSON is absent.
+        #[arg(long, short, value_name = "PATH")]
+        config: Option<PathBuf>,
     },
     /// Read a configuration and report every problem in it, not just the first.
     Check {
-        /// The configuration file.
-        #[arg(long, short, default_value = DEFAULT_CONFIG, value_name = "PATH")]
-        config: PathBuf,
+        /// Config file; default client.json, or client.toml only when JSON is absent.
+        #[arg(long, short, value_name = "PATH")]
+        config: Option<PathBuf>,
     },
     /// Ask what is wrong: file, listeners, keys, reach and clock agreement.
     Doctor {
-        /// The configuration file.
-        #[arg(long, short, default_value = DEFAULT_CONFIG, value_name = "PATH")]
-        config: PathBuf,
+        /// Config file; default client.json, or client.toml only when JSON is absent.
+        #[arg(long, short, value_name = "PATH")]
+        config: Option<PathBuf>,
         /// Check only this node, by its name.
         #[arg(long, value_name = "NAME")]
         node: Option<String>,
@@ -96,12 +96,42 @@ enum Command {
         /// One of `local`, `dns`, `connect`, `timeout`, `handshake`, `rejected`, `idle`.
         family: String,
     },
-    /// Write a commented configuration to stdout, or to `--out`.
+    /// Write a JSON configuration (or legacy TOML) to stdout, or to `--out`.
     Generate {
         /// Where to write it. Absent means standard output.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Format; otherwise inferred from .toml output, JSON everywhere else.
+        #[arg(long, value_enum)]
+        format: Option<ConfigFormat>,
     },
+    /// Convert a validated config to canonical JSON without changing identity.
+    Migrate {
+        #[arg(long, short, value_name = "PATH")]
+        config: PathBuf,
+        /// New destination file; existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, ValueEnum)]
+enum ConfigFormat {
+    Json,
+    Toml,
+}
+
+fn selected_config(path: Option<PathBuf>) -> PathBuf {
+    path.unwrap_or_else(|| {
+        if std::fs::symlink_metadata(DEFAULT_CONFIG)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && Path::new("client.toml").exists()
+        {
+            PathBuf::from("client.toml")
+        } else {
+            PathBuf::from(DEFAULT_CONFIG)
+        }
+    })
 }
 
 #[tokio::main]
@@ -120,11 +150,14 @@ async fn main() -> ExitCode {
 
 async fn dispatch(command: Command, logger: &Logger) -> u8 {
     match command {
-        Command::Run { config } => run(&config, logger).await,
-        Command::Check { config } => check(&config),
-        Command::Doctor { config, node } => doctor(&config, node.as_deref(), logger).await,
+        Command::Run { config } => run(&selected_config(config), logger).await,
+        Command::Check { config } => check(&selected_config(config)),
+        Command::Doctor { config, node } => {
+            doctor(&selected_config(config), node.as_deref(), logger).await
+        }
         Command::Explain { family } => explain(&family),
-        Command::Generate { out } => generate(out.as_deref()),
+        Command::Generate { out, format } => generate(out.as_deref(), format),
+        Command::Migrate { config, out } => migrate(&config, &out),
     }
 }
 
@@ -198,7 +231,12 @@ fn check(path: &Path) -> u8 {
 fn load(path: &Path) -> Result<Config, Vec<String>> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| vec![format!("{}: cannot be read: {error}", path.display())])?;
-    rust_reality_client::config::parse(&text)
+    let parsed = match path.extension().and_then(|s| s.to_str()) {
+        Some("json") => rust_reality_client::config::parse_json(&text),
+        Some("toml") => rust_reality_client::config::parse_toml(&text),
+        _ => rust_reality_client::config::parse(&text),
+    };
+    parsed
         .map_err(|error| error.problems().to_vec())
         .map_err(|problems| {
             problems
@@ -630,8 +668,22 @@ const EXPLAINED: [(Failure, &str); 7] = [
 ];
 
 /// Writes the template, with a user id nobody else has.
-fn generate(out: Option<&Path>) -> u8 {
-    let text = match template() {
+fn generate(out: Option<&Path>, format: Option<ConfigFormat>) -> u8 {
+    let format = format.unwrap_or_else(|| {
+        if out.and_then(Path::extension).and_then(|s| s.to_str()) == Some("toml") {
+            ConfigFormat::Toml
+        } else {
+            ConfigFormat::Json
+        }
+    });
+    if let Some(extension) = out.and_then(Path::extension).and_then(|s| s.to_str()) {
+        if (extension == "json" && format != ConfigFormat::Json)
+            || (extension == "toml" && format != ConfigFormat::Toml)
+        {
+            return reject(&["--format conflicts with the output filename extension".to_owned()]);
+        }
+    }
+    let text = match template(format) {
         Ok(text) => text,
         Err(error) => {
             let _ = writeln!(std::io::stderr(), "a user id could not be drawn: {error}");
@@ -642,7 +694,17 @@ fn generate(out: Option<&Path>) -> u8 {
         let _ = std::io::stdout().write_all(text.as_bytes());
         return OK;
     };
-    match std::fs::write(path, text) {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options
+        .open(path)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+    {
         Ok(()) => {
             let _ = writeln!(std::io::stderr(), "wrote {}", path.display());
             OK
@@ -662,7 +724,7 @@ fn generate(out: Option<&Path>) -> u8 {
 ///
 /// One source of truth means `generate | check` is a test of the example file, and
 /// the example file is what the README shows.
-fn template() -> Result<String, std::io::Error> {
+fn template(format: ConfigFormat) -> Result<String, std::io::Error> {
     let mut bytes = [0_u8; 16];
     entropy::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
     // The version-4 and variant bits, so the string is a v4 id in the shape the
@@ -670,5 +732,54 @@ fn template() -> Result<String, std::io::Error> {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let id = uuid::Uuid::from_bytes(bytes).to_string();
-    Ok(include_str!("../examples/client.toml").replace(TEMPLATE_USER_ID, &id))
+    let example = match format {
+        ConfigFormat::Json => include_str!("../examples/client.json"),
+        ConfigFormat::Toml => include_str!("../examples/client.toml"),
+    };
+    Ok(example.replace(TEMPLATE_USER_ID, &id))
+}
+
+/// Explicitly requested credential-bearing output; never print it in diagnostics.
+fn migrate(input: &Path, output: &Path) -> u8 {
+    if output.extension().and_then(|s| s.to_str()) == Some("toml") {
+        return reject(&["migration writes JSON; choose a .json output path".to_owned()]);
+    }
+    let config = match load(input) {
+        Ok(c) => c,
+        Err(p) => return reject(&p),
+    };
+    let text = rust_reality_client::config::to_json(&config);
+    if let Err(e) = rust_reality_client::config::parse_json(&text) {
+        return reject(&[format!(
+            "configuration cannot be represented as active JSON: {e}"
+        )]);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(output).and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    }) {
+        Ok(()) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "wrote {} (credentials preserved)",
+                output.display()
+            );
+            OK
+        }
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}: cannot create new configuration: {e}",
+                output.display()
+            );
+            BROKEN
+        }
+    }
 }

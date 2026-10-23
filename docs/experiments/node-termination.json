@@ -1,0 +1,255 @@
+{
+  "requested_seconds": 20.0,
+  "origin_only_control": false,
+  "implementation": "rust-current",
+  "handoff": true,
+  "node_address": "127.0.0.1",
+  "with_recovery": false,
+  "entry_family": "both",
+  "quiet_seconds": 65,
+  "quiet_client": false,
+  "passed": true,
+  "websockets": "15.0.1",
+  "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+  "binary_sha256": "f12942e3fad2a9938a14c3739748021a908236eab2e897a4d2c461145d20a5f6",
+  "workloads": {
+    "wss-http-tls13": {
+      "messages": 10,
+      "wall_seconds": 19.99827163200098,
+      "close_code": 1000
+    },
+    "wss-http-tls12": {
+      "messages": 10,
+      "wall_seconds": 19.990367268997943,
+      "close_code": 1000
+    },
+    "wss-socks-tls12": {
+      "messages": 10,
+      "wall_seconds": 19.98650952999742,
+      "close_code": 1000
+    },
+    "wss-socks-tls13": {
+      "messages": 10,
+      "wall_seconds": 19.994087341001432,
+      "close_code": 1000
+    },
+    "sse-socks-tls13": {
+      "events": 100
+    },
+    "sse-http-tls13": {
+      "events": 100
+    },
+    "sse-http-tls12": {
+      "events": 100
+    },
+    "sse-socks-tls12": {
+      "events": 100
+    },
+    "churn": 40
+  },
+  "limitations": [
+    "no packet-loss/netem or real NAT impairment",
+    "no production credentials or AI provider traffic"
+  ],
+  "pipelining": [
+    {
+      "tls": "TLSv1.3",
+      "bytes": 65536,
+      "inbound": "http"
+    },
+    {
+      "tls": "TLSv1.3",
+      "bytes": 65536,
+      "inbound": "socks"
+    },
+    {
+      "tls": "TLSv1.2",
+      "bytes": 65536,
+      "inbound": "http"
+    },
+    {
+      "tls": "TLSv1.2",
+      "bytes": 65536,
+      "inbound": "socks"
+    }
+  ],
+  "node_termination": {
+    "terminal_visible": true,
+    "elapsed_seconds": 0.002102180995279923,
+    "proxy_still_running": true
+  },
+  "wall_seconds": 20.426308327005245,
+  "after_drain": {
+    "monotonic": 41378.20852588,
+    "rss_kib": 4504,
+    "fds": 11,
+    "threads": 10,
+    "cpu_seconds": 0.08
+  },
+  "handoff_sessions": 52,
+  "server_modes": [
+    "non-direct"
+  ],
+  "observed_downlinks": [
+    "direct",
+    "outer"
+  ],
+  "session_completions": 53,
+  "resources": [
+    {
+      "timestampUnixMs": 1791057038581,
+      "level": "debug",
+      "event": "resources",
+      "active": 0,
+      "trackedHighWater": 0,
+      "connectionsAvailable": 256,
+      "handshakesAvailable": 32,
+      "probesAvailable": 4,
+      "sparesAvailable": 16,
+      "accepted": 0,
+      "carried": 0,
+      "failed": 0,
+      "panicked": 0,
+      "cancelled": 0
+    },
+    {
+      "timestampUnixMs": 1791057060103,
+      "level": "debug",
+      "event": "resources",
+      "active": 0,
+      "trackedHighWater": 9,
+      "connectionsAvailable": 256,
+      "handshakesAvailable": 32,
+      "probesAvailable": 4,
+      "sparesAvailable": 16,
+      "accepted": 54,
+      "carried": 53,
+      "failed": 0,
+      "panicked": 0,
+      "cancelled": 0
+    }
+  ],
+  "samples": [
+    {
+      "monotonic": 41356.78459052,
+      "rss_kib": 3392,
+      "fds": 11,
+      "threads": 10,
+      "cpu_seconds": 0.0
+    },
+    {
+      "monotonic": 41361.785007076,
+      "rss_kib": 4320,
+      "fds": 27,
+      "threads": 10,
+      "cpu_seconds": 0.03
+    },
+    {
+      "monotonic": 41366.785506279,
+      "rss_kib": 4408,
+      "fds": 27,
+      "threads": 10,
+      "cpu_seconds": 0.04
+    },
+    {
+      "monotonic": 41371.785995304,
+      "rss_kib": 4504,
+      "fds": 27,
+      "threads": 10,
+      "cpu_seconds": 0.06
+    },
+    {
+      "monotonic": 41376.786376768,
+      "rss_kib": 4504,
+      "fds": 19,
+      "threads": 10,
+      "cpu_seconds": 0.07
+    }
+  ],
+  "roundtrip_samples": 80,
+  "roundtrip_seconds": [
+    0.0032466569973621517,
+    0.002732501998252701,
+    0.0029251929954625666,
+    0.004706820996943861,
+    0.004602993998560123,
+    0.0012511370005086064,
+    0.0010108350033988245,
+    0.0009508340008324012,
+    0.0009408490004716441,
+    0.0007657050009584054,
+    0.0011379670031601563,
+    0.0009143990027951077,
+    0.0009411999999429099,
+    0.0005337149996194057,
+    0.0006393949952325784,
+    0.0008766230021137744,
+    0.0006244620017241687,
+    0.0009913450048770756,
+    0.0006253030005609617,
+    0.0006628100018133409,
+    0.000883423002960626,
+    0.0030904820014256984,
+    0.0028200839951750822,
+    0.0026163059956161305,
+    0.002413360998616554,
+    0.0008193159956135787,
+    0.000959386998147238,
+    0.0012641869980143383,
+    0.0012529200030257925,
+    0.00162258799537085,
+    0.0009054959955392405,
+    0.0008453550035483204,
+    0.0013602219987660646,
+    0.0008427909997408278,
+    0.0012620839988812804,
+    0.0009946700010914356,
+    0.0011219930020160973,
+    0.0010416410004836507,
+    0.0008833329993649386,
+    0.0008609889991930686,
+    0.0010784769983729348,
+    0.0010825930003193207,
+    0.0008774539965088479,
+    0.0012506470011430793,
+    0.000677692994941026,
+    0.0007893009969848208,
+    0.0007106120028765872,
+    0.0007761810047668405,
+    0.000875260004249867,
+    0.0006118230012361892,
+    0.0007279679994098842,
+    0.000733687003958039,
+    0.0008336169994436204,
+    0.0006658949932898395,
+    0.0005765300011262298,
+    0.0007012069982010871,
+    0.0010196370058110915,
+    0.0007517429985455237,
+    0.0009179939952446148,
+    0.000619423997704871,
+    0.0007419479952659458,
+    0.0006534560016007163,
+    0.0005205749985179864,
+    0.0008901619949028827,
+    0.0006160689954413101,
+    0.0010347199931857176,
+    0.0006737660005455837,
+    0.0007731160003459081,
+    0.0005870360037079081,
+    0.0006865360046504065,
+    0.0008756699971854687,
+    0.0009790559997782111,
+    0.0007141169990063645,
+    0.0007036310053081252,
+    0.0009102320036618039,
+    0.0007166909999796189,
+    0.00093300699518295,
+    0.0006164890000945888,
+    0.0005934150030952878,
+    0.0007372820036835037
+  ],
+  "roundtrip_p50_ms": 0.8774539965088479,
+  "roundtrip_p95_ms": 3.0904820014256984,
+  "roundtrip_p99_ms": 4.706820996943861
+}

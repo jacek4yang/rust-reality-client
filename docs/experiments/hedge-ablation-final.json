@@ -1,0 +1,136 @@
+{
+  "binaries": {
+    "current": "f12942e3fad2a9938a14c3739748021a908236eab2e897a4d2c461145d20a5f6",
+    "ablated": "7a3fe9b7c01b2fd598a848766d695dc836f7f70ba92886c9e09a47ea30fb162f"
+  },
+  "trials": [
+    {
+      "setup_seconds": 0.045256650999363046,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.0029246970007079653,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.04344456900435034,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.04502739999588812,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.044040918997779954,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.0025125169995590113,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.04529798300063703,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.04553079399920534,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.32153404199925717,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 1,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 1.0054727900060243,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.8037267920008162,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.2782066699946881,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 1,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.3237199099967256,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 1,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "current"
+    },
+    {
+      "setup_seconds": 0.80358457499824,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.8032752490034909,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 0,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "ablated"
+    },
+    {
+      "setup_seconds": 0.27858619499602355,
+      "application_bytes": 23000,
+      "lead_attempts": 1,
+      "spare_attempts": 1,
+      "delay_per_bridge_read_seconds": 0.2,
+      "label": "current"
+    }
+  ]
+}

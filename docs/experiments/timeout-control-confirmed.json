@@ -1,0 +1,98 @@
+{
+  "idle-blackhole": {
+    "case": "idle-blackhole",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": true,
+    "recovered": false,
+    "restore_seconds": null,
+    "terminal": "EOF",
+    "elapsed_seconds": 60.85104967199999,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  "write-blackhole": {
+    "case": "write-blackhole",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": true,
+    "recovered": false,
+    "restore_seconds": null,
+    "terminal": "ConnectionResetError",
+    "elapsed_seconds": 60.62826260700001,
+    "bytes_received": 0,
+    "writer_observation": []
+  },
+  "40-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 40,
+    "elapsed_seconds": 40.01788955899997,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "20-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 20,
+    "elapsed_seconds": 20.059054795999998,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "40-write-transient": {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 40,
+    "elapsed_seconds": 52.75717325599999,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  "20-write-transient": {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 20,
+    "elapsed_seconds": 26.55747787400003,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  },
+  "5-idle-transient": {
+    "case": "idle-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 5,
+    "elapsed_seconds": 5.016299997000004,
+    "bytes_received": 14,
+    "writer_observation": []
+  },
+  "5-write-transient": {
+    "case": "write-transient",
+    "implementation": "rust-current",
+    "censored": false,
+    "detected": false,
+    "recovered": true,
+    "restore_seconds": 5,
+    "elapsed_seconds": 6.4744761180000125,
+    "bytes_received": 8388608,
+    "writer_observation": [
+      "accepted"
+    ]
+  }
+}

@@ -1,0 +1,628 @@
+{
+  "source": "3d829f898de19045c94f88be4552572f49059e07",
+  "workflow_run": 37153011410,
+  "reports": {
+    "gnu": {
+      "requested_seconds": 30.0,
+      "origin_only_control": false,
+      "implementation": "rust-current",
+      "handoff": true,
+      "node_address": "127.0.0.1",
+      "with_recovery": true,
+      "entry_family": "both",
+      "quiet_seconds": 65,
+      "quiet_client": false,
+      "passed": true,
+      "websockets": "15.0.1",
+      "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+      "binary_sha256": "25943d0e088c54d4f71f49107154cd9349669c1097d27e339c52b7f760995ed1",
+      "workloads": {
+        "recovery": {
+          "origin_resets": 1,
+          "local_cancellations": 1,
+          "explicit_reconnections": 2
+        },
+        "wss-socks-tls13": {
+          "messages": 10,
+          "wall_seconds": 29.995959981999476,
+          "close_code": 1000
+        },
+        "wss-http-tls13": {
+          "messages": 10,
+          "wall_seconds": 30.00032379500044,
+          "close_code": 1000
+        },
+        "wss-socks-tls12": {
+          "messages": 10,
+          "wall_seconds": 29.99011280099512,
+          "close_code": 1000
+        },
+        "wss-http-tls12": {
+          "messages": 10,
+          "wall_seconds": 29.993320711000706,
+          "close_code": 1000
+        },
+        "sse-http-tls12": {
+          "events": 150
+        },
+        "sse-socks-tls13": {
+          "events": 150
+        },
+        "sse-http-tls13": {
+          "events": 150
+        },
+        "sse-socks-tls12": {
+          "events": 150
+        },
+        "churn": 59
+      },
+      "limitations": [
+        "no packet-loss/netem or real NAT impairment",
+        "no production credentials or AI provider traffic"
+      ],
+      "pipelining": [
+        {
+          "tls": "TLSv1.3",
+          "bytes": 65536,
+          "inbound": "http"
+        },
+        {
+          "tls": "TLSv1.3",
+          "bytes": 65536,
+          "inbound": "socks"
+        },
+        {
+          "tls": "TLSv1.2",
+          "bytes": 65536,
+          "inbound": "http"
+        },
+        {
+          "tls": "TLSv1.2",
+          "bytes": 65536,
+          "inbound": "socks"
+        }
+      ],
+      "node_termination": {
+        "terminal_visible": true,
+        "elapsed_seconds": 0.0010704750020522624,
+        "proxy_still_running": true
+      },
+      "wall_seconds": 30.133893647995137,
+      "after_drain": {
+        "monotonic": 46424.876698702,
+        "rss_kib": 4612,
+        "fds": 11,
+        "threads": 10,
+        "cpu_seconds": 0.11
+      },
+      "handoff_sessions": 75,
+      "server_modes": [
+        "non-direct"
+      ],
+      "observed_downlinks": [
+        "direct",
+        "outer"
+      ],
+      "session_completions": 76,
+      "resources": [
+        {
+          "timestampUnixMs": 1791062075541,
+          "level": "debug",
+          "event": "resources",
+          "active": 0,
+          "trackedHighWater": 0,
+          "connectionsAvailable": 256,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 0,
+          "carried": 0,
+          "failed": 0,
+          "panicked": 0,
+          "cancelled": 0
+        },
+        {
+          "timestampUnixMs": 1791062105540,
+          "level": "debug",
+          "event": "resources",
+          "active": 8,
+          "trackedHighWater": 10,
+          "connectionsAvailable": 248,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 76,
+          "carried": 66,
+          "failed": 1,
+          "panicked": 0,
+          "cancelled": 0
+        },
+        {
+          "timestampUnixMs": 1791062106771,
+          "level": "debug",
+          "event": "resources",
+          "active": 0,
+          "trackedHighWater": 10,
+          "connectionsAvailable": 256,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 77,
+          "carried": 75,
+          "failed": 1,
+          "panicked": 0,
+          "cancelled": 0
+        }
+      ],
+      "samples": [
+        {
+          "monotonic": 46393.740711501,
+          "rss_kib": 3384,
+          "fds": 11,
+          "threads": 10,
+          "cpu_seconds": 0.0
+        },
+        {
+          "monotonic": 46398.741394216,
+          "rss_kib": 4392,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.02
+        },
+        {
+          "monotonic": 46403.74189314,
+          "rss_kib": 4408,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.05
+        },
+        {
+          "monotonic": 46408.742370596,
+          "rss_kib": 4428,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.06
+        },
+        {
+          "monotonic": 46413.742833157,
+          "rss_kib": 4612,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.07
+        },
+        {
+          "monotonic": 46418.743297793,
+          "rss_kib": 4628,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.09
+        },
+        {
+          "monotonic": 46423.743691798,
+          "rss_kib": 4628,
+          "fds": 19,
+          "threads": 10,
+          "cpu_seconds": 0.11
+        }
+      ],
+      "roundtrip_samples": 101,
+      "roundtrip_seconds": [
+        0.0024727799973334186,
+        0.0021911549993092194,
+        0.0021662380022462457,
+        0.004315329999371897,
+        0.00523238299501827,
+        0.0008979740014183335,
+        0.0006971410039113835,
+        0.000741048002964817,
+        0.0010575150008662604,
+        0.0007981840026332065,
+        0.0005149770004209131,
+        0.0007617390001541935,
+        0.0011709859973052517,
+        0.0008127759938361123,
+        0.0009320760000264272,
+        0.0007659859984414652,
+        0.0011177760025020689,
+        0.0007855250005377457,
+        0.0008190350054064766,
+        0.0007773530014674179,
+        0.000613545002124738,
+        0.0011060680044465698,
+        0.0006520030001411214,
+        0.0013679430048796348,
+        0.001819714998418931,
+        0.0015033680028864183,
+        0.0016287769976770505,
+        0.0011733100036508404,
+        0.0009564830033923499,
+        0.0007683389994781464,
+        0.0007055440000840463,
+        0.0008009680022951216,
+        0.0007285090032382868,
+        0.001152809003542643,
+        0.0009352409979328513,
+        0.0007917949988041073,
+        0.0005814879987156019,
+        0.0008635729973320849,
+        0.0005998339984216727,
+        0.0006149869950604625,
+        0.0008438430013484322,
+        0.0006459440046455711,
+        0.0005598839998128824,
+        0.0006709119988954626,
+        0.0005416969943325967,
+        0.0008303729991894215,
+        0.0008351799988304265,
+        0.0007136870044632815,
+        0.0006837010005256161,
+        0.0019982890007668175,
+        0.001194611999380868,
+        0.0006201060023158789,
+        0.0007268269982887432,
+        0.0009015899995574728,
+        0.0007573929979116656,
+        0.0005684979987563565,
+        0.0007131349993869662,
+        0.0006996550000621937,
+        0.0005514919976121746,
+        0.0007090700019034557,
+        0.000655519004794769,
+        0.0006702710015815683,
+        0.0007687100005568936,
+        0.0006857049957034178,
+        0.0008844540061545558,
+        0.0006981129990890622,
+        0.0007402769988402724,
+        0.0008581240035709925,
+        0.0007752990059088916,
+        0.0008464870043098927,
+        0.0008852549945004284,
+        0.0008028910015127622,
+        0.0012230550055392087,
+        0.0009760730026755482,
+        0.0010028429969679564,
+        0.0009489810036029667,
+        0.0008055459984461777,
+        0.0007905620004748926,
+        0.000886357003764715,
+        0.0008652149990666658,
+        0.0007736170009593479,
+        0.0008714549985597841,
+        0.0006063039982109331,
+        0.0008035920036491007,
+        0.000662730002659373,
+        0.0006459549986175261,
+        0.0008285190051537938,
+        0.0008669279995956458,
+        0.0008481400000164285,
+        0.0007204770008684136,
+        0.0006432599984691478,
+        0.0010181959951296449,
+        0.0007163300033425912,
+        0.0009129669997491874,
+        0.0007364709963439964,
+        0.0011660289965220727,
+        0.0006033000026945956,
+        0.0007609270032844506,
+        0.0005487079979502596,
+        0.001002441997115966,
+        0.0006955099961487576
+      ],
+      "roundtrip_p50_ms": 0.7981840026332065,
+      "roundtrip_p95_ms": 1.9982890007668175,
+      "roundtrip_p99_ms": 4.315329999371897
+    },
+    "musl": {
+      "requested_seconds": 30.0,
+      "origin_only_control": false,
+      "implementation": "rust-current",
+      "handoff": true,
+      "node_address": "127.0.0.1",
+      "with_recovery": true,
+      "entry_family": "both",
+      "quiet_seconds": 65,
+      "quiet_client": false,
+      "passed": true,
+      "websockets": "15.0.1",
+      "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+      "binary_sha256": "bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32",
+      "workloads": {
+        "recovery": {
+          "origin_resets": 1,
+          "local_cancellations": 1,
+          "explicit_reconnections": 2
+        },
+        "wss-socks-tls12": {
+          "messages": 10,
+          "wall_seconds": 29.98800995900092,
+          "close_code": 1000
+        },
+        "wss-socks-tls13": {
+          "messages": 10,
+          "wall_seconds": 29.995404017994588,
+          "close_code": 1000
+        },
+        "wss-http-tls13": {
+          "messages": 10,
+          "wall_seconds": 30.000036094999814,
+          "close_code": 1000
+        },
+        "wss-http-tls12": {
+          "messages": 10,
+          "wall_seconds": 29.992193430000043,
+          "close_code": 1000
+        },
+        "sse-socks-tls12": {
+          "events": 150
+        },
+        "sse-socks-tls13": {
+          "events": 150
+        },
+        "sse-http-tls13": {
+          "events": 150
+        },
+        "sse-http-tls12": {
+          "events": 150
+        },
+        "churn": 59
+      },
+      "limitations": [
+        "no packet-loss/netem or real NAT impairment",
+        "no production credentials or AI provider traffic"
+      ],
+      "pipelining": [
+        {
+          "tls": "TLSv1.3",
+          "bytes": 65536,
+          "inbound": "http"
+        },
+        {
+          "tls": "TLSv1.3",
+          "bytes": 65536,
+          "inbound": "socks"
+        },
+        {
+          "tls": "TLSv1.2",
+          "bytes": 65536,
+          "inbound": "http"
+        },
+        {
+          "tls": "TLSv1.2",
+          "bytes": 65536,
+          "inbound": "socks"
+        }
+      ],
+      "node_termination": {
+        "terminal_visible": true,
+        "elapsed_seconds": 0.0008962370047811419,
+        "proxy_still_running": true
+      },
+      "wall_seconds": 30.150310162003734,
+      "after_drain": {
+        "monotonic": 46457.399309144,
+        "rss_kib": 2508,
+        "fds": 11,
+        "threads": 10,
+        "cpu_seconds": 0.13
+      },
+      "handoff_sessions": 75,
+      "server_modes": [
+        "non-direct"
+      ],
+      "observed_downlinks": [
+        "direct",
+        "outer"
+      ],
+      "session_completions": 76,
+      "resources": [
+        {
+          "timestampUnixMs": 1791062108099,
+          "level": "debug",
+          "event": "resources",
+          "active": 0,
+          "trackedHighWater": 0,
+          "connectionsAvailable": 256,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 0,
+          "carried": 0,
+          "failed": 0,
+          "panicked": 0,
+          "cancelled": 0
+        },
+        {
+          "timestampUnixMs": 1791062138099,
+          "level": "debug",
+          "event": "resources",
+          "active": 8,
+          "trackedHighWater": 10,
+          "connectionsAvailable": 248,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 76,
+          "carried": 66,
+          "failed": 1,
+          "panicked": 0,
+          "cancelled": 0
+        },
+        {
+          "timestampUnixMs": 1791062139294,
+          "level": "debug",
+          "event": "resources",
+          "active": 0,
+          "trackedHighWater": 10,
+          "connectionsAvailable": 256,
+          "handshakesAvailable": 32,
+          "probesAvailable": 4,
+          "sparesAvailable": 16,
+          "accepted": 77,
+          "carried": 75,
+          "failed": 1,
+          "panicked": 0,
+          "cancelled": 0
+        }
+      ],
+      "samples": [
+        {
+          "monotonic": 46426.250927723,
+          "rss_kib": 2256,
+          "fds": 11,
+          "threads": 10,
+          "cpu_seconds": 0.0
+        },
+        {
+          "monotonic": 46431.251379045,
+          "rss_kib": 3120,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.03
+        },
+        {
+          "monotonic": 46436.251896923,
+          "rss_kib": 3120,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.05
+        },
+        {
+          "monotonic": 46441.252462241,
+          "rss_kib": 3120,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.07
+        },
+        {
+          "monotonic": 46446.253028126,
+          "rss_kib": 3120,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.08
+        },
+        {
+          "monotonic": 46451.253537287,
+          "rss_kib": 3204,
+          "fds": 27,
+          "threads": 10,
+          "cpu_seconds": 0.1
+        },
+        {
+          "monotonic": 46456.253979772,
+          "rss_kib": 3016,
+          "fds": 19,
+          "threads": 10,
+          "cpu_seconds": 0.13
+        }
+      ],
+      "roundtrip_samples": 101,
+      "roundtrip_seconds": [
+        0.00332824100041762,
+        0.0030584429987357,
+        0.002836699000908993,
+        0.004855774997849949,
+        0.004631727002561092,
+        0.000746856996556744,
+        0.000757301997509785,
+        0.0008190459993784316,
+        0.000513995997607708,
+        0.0004031080025015399,
+        0.0003674039980978705,
+        0.0010393880002084188,
+        0.0007750889999442734,
+        0.0005053319982835092,
+        0.0004786420031450689,
+        0.00046456999552901834,
+        0.0007721749934717081,
+        0.0005756280006607994,
+        0.0004476949980016798,
+        0.0007713240047451109,
+        0.0006434599999920465,
+        0.0005869750020792708,
+        0.000540875997103285,
+        0.00243347100331448,
+        0.002190754996263422,
+        0.002096231997711584,
+        0.0028717320019495673,
+        0.0008852050013956614,
+        0.0008617300045443699,
+        0.0007021490018814802,
+        0.0008301120033138432,
+        0.0008097509999061003,
+        0.0016652220001560636,
+        0.0013503570007742383,
+        0.0013876929951948114,
+        0.0013577079953392968,
+        0.0009669790015323088,
+        0.0007885989980422892,
+        0.0007633610002812929,
+        0.0007202470005722716,
+        0.0010068089977721684,
+        0.0007599759992444888,
+        0.0009107040023081936,
+        0.0008031410034163855,
+        0.0007158799999160692,
+        0.0008394169999519363,
+        0.0006665649998467416,
+        0.0007807480069459416,
+        0.0007003459977568127,
+        0.000590130002819933,
+        0.0007769309959257953,
+        0.000884644003235735,
+        0.0017044249980244786,
+        0.0007278570046764798,
+        0.000765074000810273,
+        0.0008152700029313564,
+        0.0015247089977492578,
+        0.0007350390005740337,
+        0.0008064560024649836,
+        0.0009915550035657361,
+        0.0009240329964086413,
+        0.000953738002863247,
+        0.000777622997702565,
+        0.001089492994651664,
+        0.0006862950031063519,
+        0.0010765730039565824,
+        0.0008285500007332303,
+        0.0009746200012159534,
+        0.0008427709981333464,
+        0.0009524260021862574,
+        0.0014956250015529804,
+        0.0008481699987896718,
+        0.0006902110035298392,
+        0.0009236830010195263,
+        0.0009912400055327453,
+        0.0013302070001373067,
+        0.0006127640008344315,
+        0.000841068998852279,
+        0.000684733000525739,
+        0.0005750669952249154,
+        0.0007446930030710064,
+        0.0006319730018731207,
+        0.0007938670023577288,
+        0.0011601699952734634,
+        0.0007247730027302168,
+        0.0007209379982668906,
+        0.0007059549971017987,
+        0.0008429509980487637,
+        0.0007581730023957789,
+        0.0007688400000915863,
+        0.0005458040031953715,
+        0.0006942370018805377,
+        0.001244097002199851,
+        0.0009444640018045902,
+        0.0008584550014347769,
+        0.0016565379992243834,
+        0.0007483690060325898,
+        0.0011583970044739544,
+        0.002542570000514388,
+        0.0008202470053220168,
+        0.0006685479966108687
+      ],
+      "roundtrip_p50_ms": 0.8097509999061003,
+      "roundtrip_p95_ms": 2.836699000908993,
+      "roundtrip_p99_ms": 4.631727002561092
+    }
+  }
+}

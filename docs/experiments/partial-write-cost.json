@@ -1,0 +1,150 @@
+{
+  "compiler": "rustc1.98.1 --edition=2024 -O",
+  "scope": "standalone buffer-operation microbenchmark; not network throughput",
+  "observations": [
+    {
+      "chunk": 1,
+      "trial": 0,
+      "cursor": false,
+      "seconds": 0.453942384,
+      "verified_checksum": 1041121280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 34355544064
+    },
+    {
+      "chunk": 1,
+      "trial": 1,
+      "cursor": true,
+      "seconds": 0.013656748,
+      "verified_checksum": 1041121280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 1,
+      "trial": 2,
+      "cursor": true,
+      "seconds": 0.013588756,
+      "verified_checksum": 1041121280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 1,
+      "trial": 3,
+      "cursor": false,
+      "seconds": 0.423098655,
+      "verified_checksum": 1041121280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 34355544064
+    },
+    {
+      "chunk": 16,
+      "trial": 0,
+      "cursor": false,
+      "seconds": 0.025343775,
+      "verified_checksum": 64993280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 2143289344
+    },
+    {
+      "chunk": 16,
+      "trial": 1,
+      "cursor": true,
+      "seconds": 0.000866007,
+      "verified_checksum": 64993280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 16,
+      "trial": 2,
+      "cursor": true,
+      "seconds": 0.000879167,
+      "verified_checksum": 64993280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 16,
+      "trial": 3,
+      "cursor": false,
+      "seconds": 0.025844239,
+      "verified_checksum": 64993280,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 2143289344
+    },
+    {
+      "chunk": 128,
+      "trial": 0,
+      "cursor": false,
+      "seconds": 0.002980538,
+      "verified_checksum": 7474176,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 264241152
+    },
+    {
+      "chunk": 128,
+      "trial": 1,
+      "cursor": true,
+      "seconds": 0.000205,
+      "verified_checksum": 7474176,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 128,
+      "trial": 2,
+      "cursor": true,
+      "seconds": 0.000189426,
+      "verified_checksum": 7474176,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 128,
+      "trial": 3,
+      "cursor": false,
+      "seconds": 0.003071055,
+      "verified_checksum": 7474176,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 264241152
+    },
+    {
+      "chunk": 8192,
+      "trial": 0,
+      "cursor": false,
+      "seconds": 0.000104477,
+      "verified_checksum": 0,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 8192,
+      "trial": 1,
+      "cursor": true,
+      "seconds": 0.000129725,
+      "verified_checksum": 0,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 8192,
+      "trial": 2,
+      "cursor": true,
+      "seconds": 0.000128294,
+      "verified_checksum": 0,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    },
+    {
+      "chunk": 8192,
+      "trial": 3,
+      "cursor": false,
+      "seconds": 0.000104117,
+      "verified_checksum": 0,
+      "accepted_bytes": 8388608,
+      "tail_bytes_compacted": 0
+    }
+  ]
+}

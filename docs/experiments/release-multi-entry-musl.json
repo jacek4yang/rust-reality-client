@@ -1,0 +1,50 @@
+{
+  "passed": true,
+  "started_utc": "2026-10-04T06:12:14.978630+00:00",
+  "binary_sha256": "bdcd48519ff7d5f66c52a1c39b182c54e97a0005dc6cc038f8c6639bb8f9bb32",
+  "upstream_commit": "e3fc3dc36b931baec042074d6c88e928caf6941f",
+  "shared_landing": true,
+  "rounds": [
+    {
+      "round": 0,
+      "stalled_entry_fallback_seconds": 0.15546069199990598,
+      "killed_tunnel_terminal_seconds": 0.0012259830000402872,
+      "new_sessions": 100,
+      "new_session_max_seconds": 0.005078277999928105,
+      "original_surviving_stream_intact": true
+    },
+    {
+      "round": 1,
+      "stalled_entry_fallback_seconds": 0.15553173400076048,
+      "killed_tunnel_terminal_seconds": 0.0012335289993643528,
+      "new_sessions": 100,
+      "new_session_max_seconds": 0.011626456998783397,
+      "original_surviving_stream_intact": true
+    },
+    {
+      "round": 2,
+      "stalled_entry_fallback_seconds": 0.15485135899871239,
+      "killed_tunnel_terminal_seconds": 0.0012372050005069468,
+      "new_sessions": 100,
+      "new_session_max_seconds": 0.004727421999632497,
+      "original_surviving_stream_intact": true
+    }
+  ],
+  "final_resources": {
+    "timestampUnixMs": 1791094338478,
+    "level": "debug",
+    "event": "resources",
+    "active": 0,
+    "trackedHighWater": 3,
+    "connectionsAvailable": 256,
+    "handshakesAvailable": 32,
+    "probesAvailable": 4,
+    "sparesAvailable": 16,
+    "accepted": 305,
+    "carried": 301,
+    "failed": 3,
+    "panicked": 0,
+    "cancelled": 0
+  },
+  "finished_utc": "2026-10-04T06:12:18.491972+00:00"
+}
