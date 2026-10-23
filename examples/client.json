@@ -35,7 +35,8 @@
         "realitySettings": {
           "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           "shortId": "abcd",
-          "serverName": "www.example.com"
+          "serverName": "www.example.com",
+          "fingerprint": "chrome"
         }
       }
     }

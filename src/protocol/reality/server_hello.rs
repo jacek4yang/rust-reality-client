@@ -257,26 +257,23 @@ fn validate_key_share(
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::reality::Fingerprint;
     use crate::protocol::reality::auth::{AuthPlaintext, CLIENT_VERSION};
     use crate::protocol::reality::hello::{ClientKeyAgreement, build_client_hello};
 
     use super::*;
 
     fn hello() -> HelloRecord {
-        let keys = ClientKeyAgreement::generate().expect("key agreement");
+        let profile = Fingerprint::Chrome.resolve([1; 32]);
+        let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).expect("key agreement");
         let plaintext = AuthPlaintext {
             version: CLIENT_VERSION,
             time: 1_700_000_000,
             short_id: [1, 2, 3, 4, 5, 6, 7, 8],
         };
-        let (record, _key) = build_client_hello(
-            "example.com",
-            &[b"h2", b"http/1.1"],
-            &keys,
-            &[0x11; 32],
-            plaintext,
-        )
-        .expect("client hello");
+        let (record, _key) =
+            build_client_hello("example.com", profile, &keys, &[0x11; 32], plaintext)
+                .expect("client hello");
         record
     }
 

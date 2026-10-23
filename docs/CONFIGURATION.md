@@ -44,7 +44,8 @@ X25519 key, never its private key.
       "realitySettings": {
         "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "shortId": "abcd",
-        "serverName": "www.example.com"
+        "serverName": "www.example.com",
+        "fingerprint": "chrome"
       }
     }
   }]
@@ -93,15 +94,16 @@ is not migrated or replayed. The application must reconnect.
 | `realitySettings.password` | Alternative spelling of publicKey, not another password |
 | `realitySettings.shortId` | Required even-length hex string, 2..16 characters |
 | `realitySettings.serverName` | Required concrete ASCII DNS name accepted by the server |
+| `realitySettings.fingerprint` | Optional browser shape, default `chrome`; see [`FINGERPRINTS.md`](FINGERPRINTS.md) |
 
 Use only one of `method`/`network`, and only one of `publicKey`/`password`.
 Even identical values in both fields are rejected, rather than given an implicit
 precedence. Fixed flow/encryption/transport defaults are conveniences of this
 client; do not extrapolate them to Xray.
 
-Unsupported fields fail closed: `routing`, `dns`, `log`, `mux`, `fingerprint`,
+Unsupported fields fail closed: `routing`, `dns`, `log`, `mux`, `fp`,
 `sniffing`, non-REALITY security, WebSocket/gRPC transports, UDP, TUN and inbound
-accounts are not silently ignored. Use `--log-level` for this client's logging.
+accounts are not silently ignored. `fp` points at `realitySettings.fingerprint`. Use `--log-level` for this client's logging.
 WSS/gRPC **application traffic inside TCP tunnels** is distinct from configuring
 WebSocket/gRPC as the proxy transport.
 

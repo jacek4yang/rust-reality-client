@@ -141,9 +141,7 @@ fn unknown(o: &Object, allowed: &[&str], path: &str, problems: &mut Vec<Problem>
                 "vnext" => {
                     "legacy vnext/users nesting is unsupported; flatten one server/user into settings.address, port, id, encryption and flow"
                 }
-                "fingerprint" | "fp" => {
-                    "fingerprint emulation is unsupported; the client uses its native ClientHello"
-                }
+                "fp" => "the fingerprint goes in streamSettings.realitySettings.fingerprint",
                 "routing" => {
                     "routing rules are unsupported; every outbound participates in automatic node selection"
                 }
@@ -379,7 +377,8 @@ pub fn to_json(config: &Config) -> String {
         "streamSettings":{"method":"raw","security":"reality","realitySettings":{
             "publicKey":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(n.reality.public_key),
             "shortId":hex_short_id(&n.reality),
-            "serverName":n.reality.server_name
+            "serverName":n.reality.server_name,
+            "fingerprint":n.reality.fingerprint.name()
         }}
     })).collect();
     let result = json!({"allowRemote":config.listen.addresses().any(|a| !a.ip().is_loopback()),"inbounds":inbounds,"outbounds":outbounds});
@@ -473,7 +472,13 @@ fn outbound_stream(o: &Object, path: &str, table: &mut toml::Table, problems: &m
         ) {
             unknown(
                 r,
-                &["publicKey", "password", "shortId", "serverName"],
+                &[
+                    "publicKey",
+                    "password",
+                    "shortId",
+                    "serverName",
+                    "fingerprint",
+                ],
                 &format!("{path}.streamSettings.realitySettings"),
                 problems,
             );
@@ -484,7 +489,7 @@ fn outbound_stream(o: &Object, path: &str, table: &mut toml::Table, problems: &m
                 ));
             }
             let mut reality = toml::Table::new();
-            for key in ["publicKey", "shortId", "serverName"] {
+            for key in ["publicKey", "shortId", "serverName", "fingerprint"] {
                 let v = if key == "publicKey" {
                     r.get(key).or_else(|| r.get("password"))
                 } else {

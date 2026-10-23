@@ -25,6 +25,8 @@ pub use json::{parse_json, to_json};
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::protocol::reality::Fingerprint;
+
 /// Default SOCKS5 listen address, loopback.
 pub const DEFAULT_SOCKS5: &str = "127.0.0.1:10808";
 /// Default HTTP CONNECT listen address, loopback.
@@ -149,6 +151,8 @@ pub struct Reality {
     pub public_key: [u8; 32],
     /// Server name sent as SNI, and matched case-insensitively by the node.
     pub server_name: String,
+    /// Browser `ClientHello` shape. Defaults to `chrome` (Chrome 133).
+    pub fingerprint: Fingerprint,
     /// Eight wire bytes, right-zero-padded from the configured hex.
     short_id: [u8; 8],
     /// How the short ID was spelled, kept only so `doctor` can echo the shape.
@@ -197,6 +201,7 @@ impl fmt::Debug for Reality {
         formatter
             .debug_struct("Reality")
             .field("serverName", &self.server_name)
+            .field("fingerprint", &self.fingerprint.name())
             .field("shortId", &self.short_id_chars())
             .finish_non_exhaustive()
     }
@@ -503,21 +508,50 @@ fn read_reality(table: &toml::Table, root: &str, problems: &mut Vec<Problem>) ->
     };
     reject_unknown(
         nested,
-        &["publicKey", "shortId", "serverName"],
+        &["publicKey", "shortId", "serverName", "fingerprint"],
         &path,
         problems,
     );
     let public_key = read_key(nested, &path, problems);
     let short_id = read_short_id(nested, &path, problems);
     let server_name = read_server_name(nested, &path, problems);
-    match (public_key, short_id, server_name) {
-        (Some(public_key), Some((short_id, short_id_len)), Some(server_name)) => Some(Reality {
+    let fingerprint = read_fingerprint(nested, &path, problems);
+    match (public_key, short_id, server_name, fingerprint) {
+        (
+            Some(public_key),
+            Some((short_id, short_id_len)),
+            Some(server_name),
+            Some(fingerprint),
+        ) => Some(Reality {
             public_key,
             server_name,
+            fingerprint,
             short_id,
             short_id_len,
         }),
         _ => None,
+    }
+}
+
+fn read_fingerprint(
+    nested: &toml::Table,
+    path: &str,
+    problems: &mut Vec<Problem>,
+) -> Option<Fingerprint> {
+    let Some(value) = nested.get("fingerprint") else {
+        return Some(Fingerprint::Chrome);
+    };
+    let fingerprint_path = format!("{path}.fingerprint");
+    let Some(name) = value.as_str() else {
+        problems.push(Problem::new(fingerprint_path, "must be a string"));
+        return None;
+    };
+    match Fingerprint::parse(name) {
+        Ok(fingerprint) => Some(fingerprint),
+        Err(error) => {
+            problems.push(Problem::new(fingerprint_path, error.to_string()));
+            None
+        }
     }
 }
 
@@ -628,8 +662,7 @@ fn reject_unknown(table: &toml::Table, allowed: &[&str], path: &str, problems: &
         ("sid", "the short ID goes in shortId"),
         (
             "fp",
-            "this client sends its own ClientHello shape, so there is no fingerprint field: \
-                v2.0.1 never inspects one",
+            "the browser ClientHello shape goes in fingerprint (for example \"chrome\")",
         ),
         (
             "flow",

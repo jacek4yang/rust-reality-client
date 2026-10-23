@@ -126,6 +126,39 @@ Server-side acceptance conditions (`auth.rs:474-535`):
 - `|now - client_time| <= max_time_diff_ms`, default **60 000 ms**
   (`reality.rs:49-57`)
 
+## ClientHello profiles
+
+`src/protocol/reality/fingerprint/`
+
+The hello's shape is selected by `[node.reality].fingerprint`; the default is
+Chrome 133. The tables are transliterated from uTLS commit
+`aa6edf4b11af82e110eea845bb2983d30138d651` (the revision Xray v26.7.28 pins).
+[`docs/FINGERPRINTS.md`](FINGERPRINTS.md) records the profile list, source-file
+hashes and the deliberate deviations.
+
+The invariants above do not move with the shape:
+
+- the session ID is 32 bytes and carries the REALITY AEAD output;
+- the AAD is the complete handshake message with that range zeroed, so the
+  authenticator is patched only after every profile extension has been written;
+- a standalone X25519 share is always present, and the hybrid `0x11ec` share is
+  added when the profile declares it;
+- the transcript hashes the exact patched message.
+
+The initial handshake record uses record version `0x0301`, as Chrome and Xray
+do; the handshake message's own legacy version remains `0x0303`. A plaintext
+alert is read before the record-version check, because a server that rejects
+the hello may send a `0x0301` alert; the client reports the alert description
+(e.g. `peer alert: decode_error`) rather than a misleading record-version
+error.
+
+Profiles reproduce cipher suites, extension order, GREASE slots, Chrome's
+extension shuffle, BoringSSL padding, ALPS and ECH grease from the pinned uTLS
+source. Firefox's P-256 key share is deliberately omitted while P-256 remains in
+`supported_groups`: the server accepts only X25519 or X25519MLKEM768 cover
+selections. ALPN comes from the profile, so `randomizednoalpn` really offers
+none.
+
 ## TLS 1.3 continuation
 
 `src/protocol/reality/tls13/handshake.rs:330-531` (`build_server_flight_inner`)

@@ -26,8 +26,8 @@ use rust_reality_client::inbound::{
     Establish, Establishment, Gate, MAX_CONCURRENT_HANDSHAKES, MAX_LOCAL_CONNECTIONS,
 };
 use rust_reality_client::protocol::reality::{
-    AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Handshake, Negotiated, X25519_GROUP,
-    X25519_MLKEM768_GROUP, build_client_hello, complete,
+    AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, Fingerprint, Handshake, Negotiated,
+    X25519_GROUP, X25519_MLKEM768_GROUP, build_client_hello, complete,
 };
 use rust_reality_client::protocol::vless::Destination;
 use rust_reality_client::scheduler::{Policy, Scheduler};
@@ -39,8 +39,7 @@ use socket2::SockRef;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
-/// The three TLS 1.3 suites this client offers.
+/// The three TLS 1.3 suites every supported profile offers.
 const OFFERED_SUITES: [u16; 3] = [0x1301, 0x1302, 0x1303];
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// A budget for work that includes a real handshake while other connections are
@@ -145,18 +144,34 @@ fn target(name: &str) -> (Destination, u16) {
     Destination::parse(host, port).unwrap_or_else(|| panic!("{name} is not a legal destination"))
 }
 
+fn configured_fingerprint() -> Fingerprint {
+    std::env::var("RRC_INTEROP_FINGERPRINT")
+        .ok()
+        .map_or(Fingerprint::Chrome, |name| {
+            match Fingerprint::parse(&name) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => panic!("RRC_INTEROP_FINGERPRINT={name}: {error}"),
+            }
+        })
+}
+
 /// Opens one REALITY tunnel and hands back the live socket plus its handshake.
 async fn tunnel() -> (TcpStream, Handshake) {
+    tunnel_with(configured_fingerprint()).await
+}
+
+async fn tunnel_with(fingerprint: Fingerprint) -> (TcpStream, Handshake) {
     let address = parameter("RRC_INTEROP_ADDR");
     let server_name = parameter("RRC_INTEROP_SERVER_NAME");
-    let keys = ClientKeyAgreement::generate().expect("client key agreement");
+    let profile = fingerprint.resolve([0x42; 32]);
+    let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).expect("client key agreement");
     let auth = AuthPlaintext {
         version: CLIENT_VERSION,
         time: now_seconds(),
         short_id: short_id(),
     };
-    let (hello, auth_key) =
-        build_client_hello(&server_name, ALPN, &keys, &public_key(), auth).expect("client hello");
+    let (hello, auth_key) = build_client_hello(&server_name, profile, &keys, &public_key(), auth)
+        .expect("client hello");
 
     let mut stream = TcpStream::connect(&address)
         .await
@@ -175,11 +190,17 @@ async fn tunnel() -> (TcpStream, Handshake) {
 
     let handshake = tokio::time::timeout(
         READ_TIMEOUT,
-        complete(&mut stream, &hello, &keys, &auth_key, ALPN),
+        complete(&mut stream, &hello, &keys, &auth_key),
     )
     .await
     .expect("the server must answer inside the handshake budget")
     .unwrap_or_else(|error| panic!("REALITY handshake with v2.0.1 failed: {error}"));
+    if let Some(protocol) = &handshake.negotiated().alpn {
+        assert!(
+            hello.alpn().iter().any(|offered| offered == protocol),
+            "{fingerprint} claimed an ALPN the hello never offered"
+        );
+    }
     (stream, handshake)
 }
 
@@ -196,13 +217,6 @@ fn check_negotiated(negotiated: &Negotiated) {
         "the server selected a group we never shared: {:#06x}",
         negotiated.key_share_group
     );
-    if let Some(protocol) = &negotiated.alpn {
-        let claimed: &[u8] = protocol;
-        assert!(
-            ALPN.contains(&claimed),
-            "the server claimed an ALPN we never offered"
-        );
-    }
 }
 
 /// Performs one REALITY handshake and checks what the server negotiated.
@@ -217,6 +231,44 @@ async fn handshakes_once() {
 #[ignore = "requires a live rust-reality v2.0.1 server"]
 async fn reality_handshake_completes_against_v201() {
     handshakes_once().await;
+}
+
+/// Every supported shape authenticates against the live node.
+///
+/// This is intentionally a single ignored test: it exercises the profile
+/// tables end to end, including the randomized variants, rather than trusting
+/// structural unit tests alone. It makes no latency assertion, because a
+/// non-Chrome class may take the live-cover path.
+#[tokio::test]
+#[ignore = "requires a live rust-reality v2.0.1 server"]
+async fn every_supported_fingerprint_authenticates() {
+    use Fingerprint::{
+        Browser360, Chrome120, Chrome131, Chrome133, Edge85, Edge106, Firefox120, Firefox148,
+        Ios13, Ios14, Qq111, Random, Randomized, RandomizedNoAlpn, Safari263,
+    };
+    for fingerprint in [
+        Chrome133,
+        Chrome120,
+        Chrome131,
+        Firefox148,
+        Firefox120,
+        Safari263,
+        Ios13,
+        Ios14,
+        Edge85,
+        Edge106,
+        Browser360,
+        Qq111,
+        Random,
+        Randomized,
+        RandomizedNoAlpn,
+    ] {
+        let (mut stream, handshake) = tunnel_with(fingerprint).await;
+        check_negotiated(handshake.negotiated());
+        drop(handshake);
+        let _ = stream.shutdown().await;
+        eprintln!("{fingerprint}: authenticated");
+    }
 }
 
 /// Five independent handshakes, each with fresh key material.
@@ -245,13 +297,15 @@ async fn a_foreign_key_agreement_does_not_authenticate() {
     wrong[0] ^= 0x55;
     let address = parameter("RRC_INTEROP_ADDR");
     let server_name = parameter("RRC_INTEROP_SERVER_NAME");
-    let keys = ClientKeyAgreement::generate().expect("client key agreement");
+    let profile = configured_fingerprint().resolve([0x43; 32]);
+    let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).expect("client key agreement");
     let auth = AuthPlaintext {
         version: CLIENT_VERSION,
         time: now_seconds(),
         short_id: short_id(),
     };
-    let Ok((hello, auth_key)) = build_client_hello(&server_name, ALPN, &keys, &wrong, auth) else {
+    let Ok((hello, auth_key)) = build_client_hello(&server_name, profile, &keys, &wrong, auth)
+    else {
         return;
     };
     let mut stream = TcpStream::connect(&address)
@@ -264,7 +318,7 @@ async fn a_foreign_key_agreement_does_not_authenticate() {
     stream.flush().await.expect("flush");
     let outcome = tokio::time::timeout(
         READ_TIMEOUT,
-        complete(&mut stream, &hello, &keys, &auth_key, ALPN),
+        complete(&mut stream, &hello, &keys, &auth_key),
     )
     .await;
     assert!(

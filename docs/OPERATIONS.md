@@ -122,7 +122,21 @@ userId = "…"                     # 32 hex digits, canonical UUID form
 publicKey = "…"                 # URL-safe unpadded base64, 43 chars, 32 bytes
 shortId = "abcd"                # hex, 2–16 chars, even count
 serverName = "www.example.com"  # one concrete ASCII DNS name, sent as SNI
+fingerprint = "chrome"          # optional; Chrome 133 is the default
 ```
+
+In JSON this is `streamSettings.realitySettings.fingerprint` with the same
+values. `fingerprint` selects a browser ClientHello shape. The modern set is `chrome`,
+`firefox`, `safari`, `ios`, `edge`, `qq`, `random`, `randomized` and
+`randomizednoalpn`, plus explicit names such as `hellochrome_120` or
+`hello360_11_0`; [`docs/FINGERPRINTS.md`](FINGERPRINTS.md) is the complete
+table. `random` and the randomized shapes are chosen once per process so the
+node's bounded ClientHello-class cache stays stable. Android 11 OkHttp, Xray's
+360 7.5 preset and PSK/legacy shapes are refused at startup because they cannot
+complete a TLS 1.3 REALITY handshake; the client never substitutes a different
+shape silently. An exact browser shape does not guarantee a prebuilt cover
+profile: the node may take its live-cover path, which costs one cover RTT and is
+a performance property, not a failure.
 
 Anything else in the file is a problem, named by path: an unknown key,
 `[nodes]` instead of `[[node]]`, an `address` carrying a port, a `port` outside

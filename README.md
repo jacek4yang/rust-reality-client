@@ -69,20 +69,22 @@ the interop gate runs.
 | Inbound accepted by the node | VLESS `TCP` + `flow: xtls-rprx-vision` |
 | REALITY key groups | `X25519` (`0x001d`) and `X25519MLKEM768` (`0x11ec`) |
 | Authentication | AES-256-GCM / ChaCha20-Poly1305 record AEAD, `REALITY` HKDF label, 16-byte plaintext, 20-byte nonce offset — as `v2.0.1` reads them |
-| ALPN | offered, and tolerated when absent |
+| ALPN | offered with the profile's list, and tolerated when absent |
+| ClientHello fingerprint | 12 modern browser shapes plus `random`, `randomized` and `randomizednoalpn`, selected per node; source-pinned to uTLS `aa6edf4…` and checked against real Xray 26.7.28 captures, as documented in [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md) |
 | Vision | `Continue` / `End` / `Direct` decision, 8 KiB frames, the padding distributions the server produces |
 | Timestamp tolerance | the node's own `maxTimeDiffMs` default (60 000 ms) |
-| UDP, MUX, `x25519` fingerprints, other flows | **not** implemented, because `v2.0.1` does not accept them |
+| UDP, MUX, other flows | **not** implemented, because `v2.0.1` does not accept them |
 
 Wire behaviour is derived from the upstream source and proven by tests, not from
 memory: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) records the exact upstream file
-and line for each requirement, and `tests/interop_v201.rs` runs 22 live tests
-against the real node (handshake, foreign-key rejection, a Vision round trip
-through the echo target, half-close, both inbounds, the scheduler routing past a
-node that cannot authenticate, five destination fault shapes, a nested TLS 1.2
-and a nested TLS 1.3 destination with the record-layer transition each one
-provokes, an idle tunnel held past the keepalive window, a session quiet past
-that same window, a connect storm, and a soak).
+and line for each requirement, and `tests/interop_v201.rs` runs 23 live tests
+against the real node (handshake, every supported fingerprint shape,
+foreign-key rejection, a Vision round trip through the echo target, half-close,
+both inbounds, the scheduler routing past a node that cannot authenticate, five
+destination fault shapes, a nested TLS 1.2 and a nested TLS 1.3 destination
+with the record-layer transition each one provokes, an idle tunnel held past
+the keepalive window, a session quiet past that same window, a connect storm,
+and a soak).
 
 `cargo test --locked --test interop_v201 -- --ignored --test-threads=1` is the
 gate, and CI's `interop` job runs it against a node built from the commit above
@@ -173,11 +175,13 @@ See [the complete JSON example](examples/client.json) and
 - `settings`: `address`, `port`, `id` (the server's hyphenated UUID), optionally
   explicit `encryption: "none"` and `flow: "xtls-rprx-vision"`.
 - `streamSettings`: `method: "raw"`, `security: "reality"`, then `realitySettings`
-  containing `publicKey`, `shortId`, `serverName`. `network: "tcp"` / `"raw"`
+  containing `publicKey`, `shortId`, `serverName`, and optional `fingerprint`
+  (`chrome` by default; the supported names are in
+  [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md)). `network: "tcp"` / `"raw"`
   and REALITY `password` are supported alternative spellings; alias pairs
   cannot appear together.
 - This is an **Xray-style subset, not an Xray configuration importer**. Routing,
-  DNS settings, Mux, fingerprint emulation, UDP and other transports are rejected.
+  DNS settings, Mux, UDP and other transports are rejected.
   Legacy `vnext` / `users` must be flattened manually; they are not discarded.
 - Strict JSON: no comments, trailing commas, duplicate keys or unknown fields.
   Errors identify positions/paths without printing credential values.

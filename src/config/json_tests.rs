@@ -77,6 +77,21 @@ fn json_keeps_all_credential_validation_and_redaction() {
     assert!(!text.contains("secret-"));
 }
 #[test]
+fn json_fingerprints_are_read_and_unusable_names_are_refused() {
+    use crate::protocol::reality::Fingerprint;
+
+    let mut v = example();
+    v["outbounds"][0]["streamSettings"]["realitySettings"]["fingerprint"] = json!("firefox");
+    let c = parse_json(&v.to_string()).unwrap();
+    assert_eq!(Fingerprint::Firefox148, c.nodes[0].reality.fingerprint);
+
+    for name in ["android", "360", "unsafe", "hellochrome_58", "netscape"] {
+        v["outbounds"][0]["streamSettings"]["realitySettings"]["fingerprint"] = json!(name);
+        rejects(&v, "fingerprint");
+    }
+}
+
+#[test]
 fn json_listener_semantics_are_explicit() {
     let mut v = example();
     v.as_object_mut().unwrap().remove("inbounds");
@@ -128,9 +143,6 @@ fn json_unsupported_wire_modes_are_rejected() {
         v["outbounds"][0]["streamSettings"][field] = json!(value);
         rejects(&v, field);
     }
-    let mut v = example();
-    v["outbounds"][0]["streamSettings"]["realitySettings"]["fingerprint"] = json!("chrome");
-    rejects(&v, "fingerprint");
     let mut v = example();
     v["inbounds"][0]["settings"]["udp"] = json!(true);
     rejects(&v, "UDP");

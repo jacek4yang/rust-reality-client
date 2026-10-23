@@ -50,15 +50,6 @@ use crate::protocol::reality::{
 use crate::protocol::vless::Destination;
 use crate::transport::{AddressFamily, Dial, DialError, Dialed, VisionSession};
 
-/// The ALPN protocols a REALITY client offers.
-///
-/// This is the list the live v2.0.1 interop gate negotiates against
-/// (`tests/interop_v201.rs`), and the server may echo any one of it back or none:
-/// it selects what its cover target supports, so offering a realistic pair is what
-/// makes the handshake look like ordinary browser traffic. It is not a preference
-/// the tunnel honours afterwards — nothing above this module speaks HTTP.
-pub const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
-
 /// How long one authenticated stage may stay silent before it is called a timeout.
 ///
 /// v2.0.1 `src/config/node/outbound.rs:169`
@@ -234,7 +225,7 @@ impl Handoff {
             let record = hello.record();
             stream.write_all(&record).await.map_err(write_failure)?;
             stream.flush().await.map_err(write_failure)?;
-            complete(&mut *stream, &hello, &keys, &auth_key, ALPN).await
+            complete(&mut *stream, &hello, &keys, &auth_key).await
         })
         .await;
 
@@ -246,10 +237,13 @@ impl Handoff {
 
     /// Builds the one-attempt key agreement, authenticator and `ClientHello`.
     fn attempt(&self) -> Result<(HelloRecord, ClientKeyAgreement, AuthKey), Error> {
-        let keys = ClientKeyAgreement::generate().map_err(hello_failure)?;
+        let seed = crate::entropy::array::<32>()
+            .map_err(|_| Error::Io("secure entropy unavailable".to_owned()))?;
+        let profile = self.node.reality.fingerprint.resolve(seed);
+        let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).map_err(hello_failure)?;
         let (hello, auth_key) = build_client_hello(
             &self.node.reality.server_name,
-            ALPN,
+            profile,
             &keys,
             &self.node.reality.public_key,
             self.authenticator(),

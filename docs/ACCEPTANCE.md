@@ -8,8 +8,9 @@ Tested local executable SHA-256:
 See [the evidence index](experiments/README.md) for raw data and controls.
 This is a candidate for a controlled rollout, not a universal production certificate.
 
-- [x] 365 offline Linux tests; formatting, strict Clippy, Rust 1.85 MSRV.
-- [x] 22 pinned, unmodified v2.0.1 server interop tests; final-runtime CI verifies them.
+- [x] 397 offline tests in the current checkout; formatting, strict Clippy, Rust 1.85 MSRV.
+- [x] 23 pinned, unmodified v2.0.1 server interop tests; final-runtime CI verifies them.
+- [x] 15/15 supported fingerprints complete REALITY against an unmodified Xray 26.7.28 server.
 - [x] Windows offline tests, strict Clippy and MSRV; no Windows blackhole claim.
 - [x] Final 12 interleaved 120-second A/B runs; all application checks pass.
 - [x] Session-feedback, hedge and TCP user-timeout ablations; real Linux packet loss.
@@ -450,17 +451,18 @@ packet — is boxes 34 to 37, at the end of this list.
   ```
 
   ```text
-  unittests src\lib.rs      … 309 passed; 0 failed
-  tests\cli.rs              … 17 passed; 0 failed
+  unittests src\lib.rs      … 353 passed; 0 failed
+  tests\cli.rs              … 23 passed; 0 failed
   tests\fault_injection.rs  … 8 passed; 0 failed
   tests\fuzz_smoke.rs       … 4 passed; 0 failed
   tests\serve.rs            … 8 passed; 0 failed
-  tests\interop_v201.rs     … 22 ignored (they need a live node; see box 5)
+  tests\clienthello_fixtures.rs … 1 passed; 0 failed
+  tests\interop_v201.rs     … 23 ignored (they need a live node; see box 5)
   doc-tests                 … 1 passed; 0 failed
   test result: ok.          … 0 failed
   ```
 
-  346 offline tests plus one doctest, and the 22 that cannot run offline run in box 5
+  397 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
   on two platforms.
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
@@ -723,6 +725,101 @@ everything, and what each socket is proved to hold.
   socket bytes rather than as memory. Box 26's footprint line is the same claim over
   1074 connections: descriptors 13 → 13, threads 2 → 2.
 
+## ClientHello fingerprints
+
+- [x] **38. The hello is built from pinned uTLS data, every supported shape
+  survives the REALITY invariants, and the live node accepts each one.**
+
+  `src/protocol/reality/fingerprint/data.rs` carries twelve concrete shapes
+  (Chrome 120/131/133, Firefox 120/148, Safari 26.3, iOS 13/14, Edge 85/106,
+  360 11.0, QQ 11.1) plus `random`, `randomized` and `randomizednoalpn`. The
+  source revision and the SHA-256 of every uTLS file are in
+  [`docs/FINGERPRINTS.md`](FINGERPRINTS.md); the constants are not generated at
+  build time and the binary has no Go or network dependency.
+
+  Offline evidence, all in `cargo test --locked`:
+
+  ```text
+  protocol::reality::fingerprint::tests::every_concrete_profile_is_reality_capable ... ok
+  protocol::reality::fingerprint::tests::every_profile_reports_a_bounded_record_and_a_32_byte_session_id ... ok
+  protocol::reality::fingerprint::tests::firefox_omits_the_p256_share_but_keeps_it_in_groups ... ok
+  protocol::reality::fingerprint::tests::chrome_shuffles_but_keeps_grease_positions_and_capabilities ... ok
+  protocol::reality::fingerprint::tests::boring_padding_lands_on_the_boringssl_target ... ok
+  protocol::reality::fingerprint::tests::grease_values_have_the_required_shape_and_are_distinct ... ok
+  protocol::reality::fingerprint::tests::randomized_is_stable_per_seed_and_always_reality_capable ... ok
+  protocol::reality::fingerprint::tests::names_map_to_the_intended_shapes_and_unusable_names_are_refused ... ok
+  ```
+
+  The per-profile auth round trip opens the 32-byte session ID against the
+  zeroed-AAD form, and `names_map...` proves that `android`, preset `360`,
+  `unsafe`, PSK/PQ and legacy names fail at configuration time instead of being
+  replaced by another shape. The Firefox shape is asserted to carry no P-256
+  **share** while retaining P-256 in `supported_groups`.
+
+  `tests/fixtures/clienthello/` holds normalized summaries of twelve real
+  `ClientHello` records captured from unmodified Xray-core v26.7.28 (`5ca6f4b`,
+  xray.exe SHA-256 `1d96743…`) through a loopback tee. The capture conditions
+  and normalization are recorded in that directory's README;
+  `cargo test --locked --test clienthello_fixtures` rebuilds each profile and
+  compares ciphers, extension order/multiset, groups, signature algorithms,
+  versions, ALPN, key-share groups/lengths and static bodies. It passes 12/12.
+  For Firefox the fixture retains Xray's P-256 share and the test asserts that
+  the only difference is the documented omission.
+
+  Live evidence is the same ignored test that runs the rest of the interop
+  gate:
+
+  ```sh
+  RRC_INTEROP_ADDR=… RRC_INTEROP_SERVER_NAME=… RRC_INTEROP_ALPN=… \
+    cargo test --locked --test interop_v201 -- --ignored every_supported_fingerprint_authenticates
+  ```
+
+  It walks all fifteen names in one process and requires a completed REALITY
+  handshake, an offered TLS 1.3 suite, an X25519/hybrid group, and an ALPN that
+  was actually in that hello. It asserts no latency: a non-Chrome class may take
+  the live-cover path.
+
+  On the fixture built from `v2.0.1`, the test passed 15/15 in 0.22 s. The full
+  live suite then passed 23/23 (21 in the first run; the two nested-TLS cases
+  first failed because the Windows `python3` shim was absent, and passed when
+  rerun with the real `python.exe`). The failure was the harness interpreter,
+  not the tunnel or the hello: the driver never connected, so the relay never
+  saw it.
+
+  What this does not establish: that a middlebox sees an ordinary browser. The
+  tests prove construction, shape equality with captured Xray records, and
+  REALITY acceptance — not full TLS record-layer or timing behaviour. The
+  capture comparison runs offline in the normal test suite; the live node
+  remains the interop authority.
+
+- [x] **39. The factory ClientHello wire defects are fixed, and the client
+  reports a real reject instead of inventing one.**
+
+  The released v0.1.1 hello had two concrete defects: `status_request` was five
+  bytes short (`[0,0]` instead of status_type 1 plus two zero lengths), and
+  `psk_key_exchange_modes` was written as `0x2d00` instead of `0x002d`. Xray
+  26.7.28 answers that hello with `15 03 01 00 02 02 32` — fatal
+  `decode_error` — while the older client looked only at the record version
+  0x0301 and reported `record version`, which sent the operator in the wrong
+  direction.
+
+  Regression coverage is
+  `the_two_factory_encoding_bugs_and_record_version_stay_fixed`: it asserts the
+  five-byte status body, the 0x002d/`[1,1]` PSK-modes extension, the absence of
+  0x2d00, and the initial record header `[22, 3, 1]`. The alert path is
+  `a_plaintext_alert_is_reported_as_a_refusal`: a 0x0301 record carrying
+  `decode_error` is now reported as `peer alert: decode_error`, not as a
+  record-version failure. The Chrome profile has 15 non-GREASE ciphers and 16
+  non-GREASE extensions, its ALPN is h2, and
+  `chrome_matches_the_captured_xray_ja4_cipher_hash` reproduces the captured
+  JA4 cipher hash `8daaf6152771`.
+
+  The fixed source was run against an unmodified **Xray 26.7.28 server** on
+  loopback (self-signed TLS 1.3 cover): all 15 supported fingerprints completed
+  a REALITY handshake, and the earlier factory failure did not recur. This is a
+  source fix; the already-published v0.1.1 artifact predates it and must be
+  rebuilt from a commit that contains this box.
+
 ---
 
 ## What this file does not establish
@@ -742,5 +839,9 @@ everything, and what each socket is proved to hold.
 * That the fault matrix covers more than the seven failure families the taxonomy has. It
   covers exactly those seven, both inbound edges, and a live node for four destination
   shapes.
+* That any fingerprint is indistinguishable from the browser it names. Box 38
+  proves source-derived construction, equality with captured Xray shapes and
+  REALITY acceptance, not what a DPI or middlebox observes after the first
+  flight.
 * Anything about QUIC, HTTP/3, UDP, TUN, MUX or session migration. `v2.0.1` has no
   cross-node resume, so no box here claims one; see README §18.

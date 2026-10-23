@@ -132,8 +132,8 @@ impl fmt::Debug for Handshake {
 /// Completes the TLS 1.3 continuation over a stream that already carries our
 /// `ClientHello` record.
 ///
-/// `offered_alpn` must be exactly the list the hello carried, because the
-/// server's `EncryptedExtensions` may claim one of those protocols.
+/// The offered ALPN list is read from `hello`, so it is always exactly what
+/// the wire carried, including an empty list for `randomizednoalpn`.
 ///
 /// # Errors
 ///
@@ -147,7 +147,6 @@ pub async fn complete<S>(
     hello: &HelloRecord,
     keys: &ClientKeyAgreement,
     auth_key: &AuthKey,
-    offered_alpn: &[&[u8]],
 ) -> Result<Handshake, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -174,7 +173,8 @@ where
     let mut flight = MessageBuffer::new();
     let encrypted_extensions =
         next_message(stream, &mut scratch, &mut server_records, &mut flight).await?;
-    let alpn = parse_encrypted_extensions(&encrypted_extensions, offered_alpn)?;
+    let offered: Vec<&[u8]> = hello.alpn().iter().map(Vec::as_slice).collect();
+    let alpn = parse_encrypted_extensions(&encrypted_extensions, &offered)?;
     hasher.update(&encrypted_extensions);
 
     let certificate = next_message(stream, &mut scratch, &mut server_records, &mut flight).await?;
@@ -328,22 +328,33 @@ where
         .ok_or(Error::Handshake(HandshakeError::Protocol(
             "record content type",
         )))?;
+    let body_len = usize::from(u16::from_be_bytes([scratch[3], scratch[4]]));
+    // An alert that rejects the ClientHello is written before TLS 1.3 is
+    // negotiated, so its record version may be 0x0301 rather than 0x0303.
+    // Read it before the version check; otherwise a server that says
+    // decode_error is reported as a bogus record-version failure.
+    if outer == OUTER_ALERT {
+        if body_len != 2 {
+            return Err(Error::Handshake(HandshakeError::Protocol(
+                "peer sent a malformed alert",
+            )));
+        }
+        scratch.resize(RECORD_HEADER_LEN + body_len, 0);
+        stream
+            .read_exact(&mut scratch[RECORD_HEADER_LEN..])
+            .await
+            .map_err(socket_failure)?;
+        return Err(Error::Handshake(HandshakeError::Protocol(alert_text(
+            scratch[RECORD_HEADER_LEN + 1],
+        ))));
+    }
     if scratch.get(1..3) != Some(&[3, 3][..]) {
         return Err(Error::Handshake(HandshakeError::Protocol("record version")));
     }
-    let body_len = usize::from(u16::from_be_bytes([scratch[3], scratch[4]]));
     let limit = match outer {
         OUTER_HANDSHAKE => MAX_PLAINTEXT_LEN,
         OUTER_CHANGE_CIPHER_SPEC => 1,
         OUTER_APPLICATION_DATA => MAX_CIPHERTEXT_LEN,
-        // A cover target that rejects our hello says so in the clear, and that
-        // distinction is what the scheduler needs: it is a refusal, not a
-        // broken pipe.
-        OUTER_ALERT => {
-            return Err(Error::Handshake(HandshakeError::Protocol(
-                "peer sent a plaintext alert",
-            )));
-        }
         _ => {
             return Err(Error::Handshake(HandshakeError::Protocol(
                 "record content type",
@@ -359,6 +370,43 @@ where
         .await
         .map_err(socket_failure)?;
     Ok(outer)
+}
+
+/// A stable name for the alert description a peer sent in the clear.
+fn alert_text(description: u8) -> &'static str {
+    match description {
+        0 => "peer sent close_notify",
+        10 => "peer alert: unexpected_message",
+        20 => "peer alert: bad_record_mac",
+        21 => "peer alert: decryption_failed",
+        22 => "peer alert: record_overflow",
+        30 => "peer alert: decompression_failure",
+        40 => "peer alert: handshake_failure",
+        42 => "peer alert: bad_certificate",
+        43 => "peer alert: unsupported_certificate",
+        44 => "peer alert: certificate_revoked",
+        45 => "peer alert: certificate_expired",
+        46 => "peer alert: certificate_unknown",
+        47 => "peer alert: illegal_parameter",
+        48 => "peer alert: unknown_ca",
+        49 => "peer alert: access_denied",
+        50 => "peer alert: decode_error",
+        51 => "peer alert: decrypt_error",
+        60 => "peer alert: export_restriction",
+        70 => "peer alert: protocol_version",
+        71 => "peer alert: insufficient_security",
+        80 => "peer alert: internal_error",
+        86 => "peer alert: inappropriate_fallback",
+        90 => "peer alert: user_canceled",
+        100 => "peer alert: no_renegotiation",
+        109 => "peer alert: missing_extension",
+        110 => "peer alert: unsupported_extension",
+        112 => "peer alert: unrecognized_name",
+        115 => "peer alert: unknown_psk_identity",
+        116 => "peer alert: certificate_required",
+        120 => "peer alert: no_application_protocol",
+        _ => "peer sent a plaintext alert",
+    }
 }
 
 /// Maps a socket failure onto the handshake taxonomy.
@@ -428,6 +476,7 @@ mod tests {
 
     use super::*;
     use crate::crypto::EphemeralX25519;
+    use crate::protocol::reality::Fingerprint;
     use crate::protocol::reality::auth::{AuthPlaintext, CLIENT_VERSION};
     use crate::protocol::reality::certificate::{
         HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_ENCRYPTED_EXTENSIONS,
@@ -437,7 +486,6 @@ mod tests {
     use crate::protocol::tls13::TrafficKeys;
 
     const NAME: &str = "www.example.com";
-    const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
     const SUITE: CipherSuite = CipherSuite::Aes256GcmSha384;
     const CCS_LEN: usize = CHANGE_CIPHER_SPEC_RECORD.len();
     const HANDSHAKE_SERVER_HELLO: u8 = 2;
@@ -583,15 +631,22 @@ mod tests {
     }
 
     fn client_start(node: &Node) -> (HelloRecord, ClientKeyAgreement, AuthKey) {
-        let keys = ClientKeyAgreement::generate().expect("key agreement");
+        let profile = Fingerprint::Chrome.resolve([2; 32]);
+        let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).expect("key agreement");
         let plaintext = AuthPlaintext {
             version: CLIENT_VERSION,
             time: 1_700_000_000,
             short_id: [1, 2, 3, 4, 5, 6, 7, 8],
         };
-        build_client_hello(NAME, ALPN, &keys, node.reality_key.public_key(), plaintext)
-            .map(|(hello, auth_key)| (hello, keys, auth_key))
-            .expect("client hello")
+        build_client_hello(
+            NAME,
+            profile,
+            &keys,
+            node.reality_key.public_key(),
+            plaintext,
+        )
+        .map(|(hello, auth_key)| (hello, keys, auth_key))
+        .expect("client hello")
     }
 
     /// Plays the server half of a flight and returns the wire bytes plus the
@@ -752,7 +807,7 @@ mod tests {
         let (wire, peer) = build_flight(&node, &hello, &keys, &auth_key, claim_alpn, positional);
         let (mut client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
         server_stream.write_all(&wire).await.expect("flight fits");
-        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key, ALPN)
+        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key)
             .await
             .expect("handshake");
         let flight = collect_client_flight(&mut server_stream).await;
@@ -771,7 +826,7 @@ mod tests {
         // Closing the write side lets a client that needs more data see EOF
         // rather than hang.
         drop(server_stream);
-        complete(&mut client_stream, hello, keys, auth_key, ALPN)
+        complete(&mut client_stream, hello, keys, auth_key)
             .await
             .expect_err("the client must refuse this server")
     }
@@ -817,7 +872,7 @@ mod tests {
 
         let (mut client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
         server_stream.write_all(&wire).await.expect("flight fits");
-        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key, ALPN)
+        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key)
             .await
             .expect("handshake");
         collect_client_flight(&mut server_stream).await;
@@ -1028,15 +1083,17 @@ mod tests {
     #[tokio::test]
     async fn a_plaintext_alert_is_reported_as_a_refusal() {
         let (mut client, mut server) = tokio::io::duplex(64);
+        // Xray sends a decode_error alert with the pre-negotiation 0x0301
+        // record version. It must be named as an alert, not a record version.
         server
-            .write_all(&[OUTER_ALERT, 3, 3, 0, 2, 2, 80])
+            .write_all(&[OUTER_ALERT, 3, 1, 0, 2, 2, 50])
             .await
             .expect("write");
         let mut scratch = Vec::new();
         assert!(matches!(
             read_record(&mut client, &mut scratch).await,
             Err(Error::Handshake(HandshakeError::Protocol(
-                "peer sent a plaintext alert"
+                "peer alert: decode_error"
             )))
         ));
     }
