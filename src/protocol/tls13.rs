@@ -840,8 +840,76 @@ impl RecordLayer {
         self.seal_with_padding(content_type, plaintext, padding_len, output)
     }
 
-    /// Seals one record whose payload is followed by `padding_len` zero bytes.
+    /// Reserves one record whose plaintext the caller fills in place.
     ///
+    /// Returns the offset of the record header. The caller writes exactly
+    /// `plaintext_len` bytes at `start + RECORD_HEADER_LEN` and then calls
+    /// [`Self::finish_record`]. Nothing is encrypted and the sequence is not
+    /// advanced until then, so a caller-side failure can be reported without
+    /// consuming a record number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordError`] before touching `output` when the payload is
+    /// oversized or the key has no records left.
+    pub(crate) fn begin_record(
+        &mut self,
+        plaintext_len: usize,
+        output: &mut Vec<u8>,
+    ) -> Result<usize, RecordError> {
+        self.ensure_available()?;
+        let inner_len = plaintext_len
+            .checked_add(1)
+            .filter(|length| *length <= MAX_INNER_PLAINTEXT_LEN)
+            .ok_or(RecordError::InvalidLength)?;
+        let ciphertext_len = inner_len
+            .checked_add(TAG_LEN)
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or(RecordError::InvalidLength)?;
+        let header = [
+            OUTER_APPLICATION_DATA,
+            3,
+            3,
+            ciphertext_len.to_be_bytes()[0],
+            ciphertext_len.to_be_bytes()[1],
+        ];
+        let start = output.len();
+        output.reserve_exact(RECORD_HEADER_LEN + usize::from(ciphertext_len));
+        output.extend_from_slice(&header);
+        output.resize(start + RECORD_HEADER_LEN + inner_len, 0);
+        Ok(start)
+    }
+
+    /// Seals the record reserved by [`Self::begin_record`] with `content_type`
+    /// as its inner type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordError`] when the reserved shape is no longer present or
+    /// the AEAD rejects it. The caller must treat either as a broken session.
+    pub(crate) fn finish_record(
+        &mut self,
+        start: usize,
+        content_type: ContentType,
+        output: &mut Vec<u8>,
+    ) -> Result<(), RecordError> {
+        let header: [u8; RECORD_HEADER_LEN] = output
+            .get(start..start + RECORD_HEADER_LEN)
+            .ok_or(RecordError::InvalidLength)?
+            .try_into()
+            .map_err(|_| RecordError::InvalidLength)?;
+        let body = output
+            .get_mut(start + RECORD_HEADER_LEN..)
+            .ok_or(RecordError::InvalidLength)?;
+        let type_byte = body.last_mut().ok_or(RecordError::InvalidLength)?;
+        *type_byte = content_type.wire_value();
+        let nonce = self.nonce();
+        let tag = self.cipher.seal(&nonce, &header, body)?;
+        output.extend_from_slice(&tag);
+        self.advance()
+    }
+
+    /// Seals one record whose payload is followed by `padding_len` zero bytes.
     /// A server uses this to re-seal its freshly generated handshake messages to
     /// the wire length the cover target was observed using
     /// (`tls13/handshake.rs:590-605`). The padding goes *after* the inner content

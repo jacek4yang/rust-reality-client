@@ -429,3 +429,50 @@ TLS KeyUpdate is not implemented.
 These measurements remain shared-host loopback evidence with Python endpoints.
 They do not establish WAN, application-level, or production superiority; the CI
 matrix adds Linux, Windows and macOS correctness coverage, not WAN capacity.
+
+## Aligned relay chunks, record budget and latency, 2026-10-24
+
+A 32 KiB relay buffer is 20 bytes larger than four full Vision frame contents.
+Those 20 bytes became a fifth, almost empty record on every chunk. Aligning
+`RELAY_BUFFER` to 4 × 8187 = 32,748 bytes removed that record; the downlink
+buffer is 32,768 bytes, exactly two 16 KiB records, so a local write no longer
+ends with a 20-byte fragment every second record.
+
+The record budget is the clearest evidence. Before alignment one upload session
+stopped at 109,978,845,184 bytes (102.4 GiB) with `session traffic key
+exhausted`. After alignment the same test reached 137,314,172,928 bytes
+(127.9 GiB) in 142.4 s (920 MiB/s), then reported the same explicit error. The
+client process stayed alive, RSS moved from 4.8 to 5.3 MiB, and descriptors
+returned from 11 to 10; no byte was retried. This is the full `2^24`-record
+budget for 8 KiB frames.
+
+Five rounds of 256 MiB, one stream, with the aligned buffers:
+
+| Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | Sampled RSS KiB |
+|---|---:|---:|---:|
+| Aligned client | 826.2 (732.3–856.4) | 576.1 (512.4–887.5) | 5468 |
+| Xray 26.10.21 | 647.7 (596.2–690.5) | 255.0 (241.1–298.6) | 31976 |
+
+The download range is bimodal because the shared host slowed in later rounds;
+the first two rounds were 862–887 MiB/s. Upload stayed near 800 MiB/s.
+
+`latency_compare.py` runs three alternating rounds of 1000 ping-pongs and 50
+fresh connections through each client:
+
+| Metric | This client | Xray 26.10.21 |
+|---|---:|---:|
+| Ping P50 | 0.270–0.272 ms | 0.297–0.300 ms |
+| Setup P50 | 4.25–4.46 ms | 4.13–4.27 ms |
+| Setup P95 | 4.75–5.40 ms | 4.83–5.69 ms |
+| Worst setup P99 | 6.33 ms | 31.9–33.2 ms in two of three rounds |
+| Sampled RSS | 5.8–5.9 MiB | 35–42 MiB |
+| Sampled FDs | 10 | 109–211 |
+
+`bulk_stability.py` now also checks two backpressure shapes: a 16 MiB upload
+whose sink stops reading for two seconds, and a 16 MiB upload followed by a
+half-close. Both digests matched; the stall took 2.018 s and the half-close took
+25 ms. Peak RSS during the stall was 6.8 MiB, and descriptors returned to 10.
+The pinned v2.0.1 server rejects post-handshake `Handshake` records
+(`src/protocol/reality/tls13/application_io.rs:541`), so a client-initiated
+KeyUpdate cannot be sent without breaking the wire contract; the record budget
+above is therefore a deliberate protocol limit.

@@ -476,8 +476,9 @@ the traffic it is tuned for includes a model streaming tokens into a socket the
 application is reading slowly, where a bound picked for a synchronous request
 would be the thing that ends a healthy transfer. What keeps that from becoming an
 unbounded queue is not a timer — it is that this repository's copy loop
-(`src/transport/relay.rs`, `RELAY_BUFFER`) has one fixed 32 KiB buffer per direction
-and cannot read the next chunk until the current one is accepted, so a stalled
+(`src/transport/relay.rs`, `RELAY_BUFFER`) has a fixed 32,748-byte uplink buffer
+and a 32,768-byte downlink buffer, and cannot read the next chunk until the
+current one is accepted, so a stalled
 writer stops pulling and backpressure lands where TCP already handles it: the
 source's socket receive buffer. What ends such a wait, if it ever does,
 is the kernel's own budget for unacknowledged data (`tcp_retries2`, 13 to 30 minutes

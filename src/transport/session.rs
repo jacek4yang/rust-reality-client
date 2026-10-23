@@ -69,16 +69,10 @@ use crate::protocol::vision::{
     Command, DecodeError, Decoder, EncodeError, Encoder, FRAME_SIZE, FramePlan, Mode,
 };
 use crate::protocol::vless::{self, Destination, VISION_FLOW};
+use crate::transport::relay::UPLINK_BATCH_FRAMES;
 
 /// Size of the VLESS response header, which is the tunnel's readiness signal.
 const RESPONSE_LEN: usize = 2;
-/// Vision frames sealed into one socket write.
-///
-/// The relay hands over a 32 KiB chunk; framing it as four 8 KiB records and
-/// flushing them together removes three write syscalls per chunk without
-/// changing the wire format. At most one batch is ever queued, so a stalled
-/// socket still applies backpressure on the next `poll_write`.
-const UPLINK_BATCH_FRAMES: usize = 4;
 /// Alert description the server reads as an orderly half-close
 /// (`tls13/application_io.rs:13`).
 const CLOSE_NOTIFY: u8 = 0;
@@ -127,6 +121,8 @@ pub struct VisionSession<S> {
     downlink: Downlink,
     /// socket bytes that do not yet make up one whole record
     incoming: Vec<u8>,
+    /// how much of `incoming` is live; the rest stays allocated and zeroed
+    incoming_len: usize,
     /// payload decoded out of `incoming` and not yet handed to the reader
     readable: Vec<u8>,
     readable_at: usize,
@@ -261,7 +257,8 @@ where
             encoder: Encoder::new(user_id).map_err(encoding_failure)?,
             decoder: Decoder::new(user_id),
             downlink: Downlink::Framed,
-            incoming: Vec::with_capacity(MAX_RECORD_WIRE_LEN),
+            incoming: vec![0; MAX_RECORD_WIRE_LEN],
+            incoming_len: 0,
             readable: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             readable_at: 0,
             outgoing: Vec::with_capacity(
@@ -342,7 +339,7 @@ where
                 Ok(wanted) => wanted,
                 Err(error) => return Poll::Ready(Err(self.fail(record_failure(error)))),
             };
-            if self.incoming.len() >= wanted {
+            if self.incoming_len >= wanted {
                 return Poll::Ready(self.open_record(wanted));
             }
             match self.poll_fill(context, wanted) {
@@ -413,7 +410,8 @@ where
     ///
     /// Reports the defect in bytes that can never begin an encrypted record.
     fn pending_record_len(&self) -> Result<usize, RecordError> {
-        Ok(RecordLayer::record_len(&self.incoming)?.unwrap_or(RECORD_HEADER_LEN))
+        Ok(RecordLayer::record_len(&self.incoming[..self.incoming_len])
+            ?.unwrap_or(RECORD_HEADER_LEN))
     }
 
     /// Extends `incoming` toward `wanted`, the length of the record being built.
@@ -424,11 +422,11 @@ where
     ///
     /// `Ok(false)` is the socket's end of stream.
     fn poll_fill(&mut self, context: &mut Context<'_>, wanted: usize) -> Poll<Result<bool, Error>> {
-        let start = self.incoming.len();
-        self.incoming.resize(wanted, 0);
-        // The length the socket filled is read out before `incoming` is touched
-        // again, and the buffer is dropped at the end of the block, so a partial
-        // or failed read cannot leave phantom bytes behind.
+        let start = self.incoming_len;
+        // The length the socket filled is read out before the live prefix is
+        // updated, so a partial or failed read cannot leave phantom bytes behind.
+        // The backing storage is allocated once and stays zeroed; a record does
+        // not re-zero its own headroom on every fill.
         let (outcome, filled) = {
             let Self {
                 incoming, stream, ..
@@ -437,7 +435,7 @@ where
             let outcome = Pin::new(stream).poll_read(context, &mut buffer);
             (outcome, buffer.filled().len())
         };
-        self.incoming.truncate(start + filled);
+        self.incoming_len = start + filled;
         match outcome {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(filled > 0)),
             Poll::Ready(Err(error)) => Poll::Ready(Err(self.fail(socket_failure(&error)))),
@@ -452,7 +450,14 @@ where
     /// as if it were new.
     fn open_record(&mut self, len: usize) -> Result<(), Error> {
         let outcome = self.dispatch_record(len);
-        self.incoming.drain(..len);
+        if len == self.incoming_len {
+            self.incoming_len = 0;
+        } else {
+            // `poll_fill` never reads past one record, but keeping the live
+            // remainder ordered here makes the boundary explicit.
+            self.incoming.copy_within(len..self.incoming_len, 0);
+            self.incoming_len -= len;
+        }
         outcome.map_err(|error| self.fail(error))
     }
 
@@ -544,7 +549,7 @@ impl<S> fmt::Debug for VisionSession<S> {
             .field("suite", &self.negotiated.suite)
             // Byte counts, never bytes: the buffers hold decoded payload, which
             // belongs to the application and is not this client's to print.
-            .field("incoming", &self.incoming.len())
+            .field("incoming", &self.incoming_len)
             .field("readable", &self.readable.len())
             .field("outgoing", &(self.outgoing.len() - self.outgoing_at))
             .field("awaiting_response", &self.awaiting_response)
@@ -670,13 +675,27 @@ where
                     return Poll::Ready(Err(into_io_error(&this.fail(encoding_failure(error)))));
                 }
             };
-            this.frame.clear();
-            this.frame.resize(plan.wire_len(), 0);
-            this.encoder
-                .assemble(&plan, &buf[accepted..accepted + taken], &mut this.frame);
+            let start = match this
+                .outbound
+                .begin_record(plan.wire_len(), &mut this.outgoing)
+            {
+                Ok(start) => start,
+                Err(error) => {
+                    return Poll::Ready(Err(into_io_error(&this.fail(record_failure(error)))));
+                }
+            };
+            {
+                let body_start = start + RECORD_HEADER_LEN;
+                let body = &mut this.outgoing[body_start..body_start + plan.wire_len()];
+                this.encoder
+                    .assemble(&plan, &buf[accepted..accepted + taken], body);
+            }
             this.encoder.commit(&plan);
-            if let Err(error) = this.seal_frame(ContentType::ApplicationData) {
-                return Poll::Ready(Err(into_io_error(&error)));
+            if let Err(error) = this
+                .outbound
+                .finish_record(start, ContentType::ApplicationData, &mut this.outgoing)
+            {
+                return Poll::Ready(Err(into_io_error(&this.fail(record_failure(error)))));
             }
             accepted += taken;
         }
@@ -1090,6 +1109,32 @@ mod tests {
         assert_eq!(session.failure(), None);
     }
 
+    /// A record delivered three bytes at a time still assembles across fills,
+    /// header and body alike. This is the fixed-buffer path's boundary case.
+    #[tokio::test]
+    async fn a_record_split_across_socket_reads_still_opens() {
+        let (mut session, mut node) = answered().await;
+        let plan = node
+            .encoder
+            .plan(5, Command::Continue, false)
+            .expect("frame plan");
+        let mut plaintext = vec![0_u8; plan.wire_len()];
+        node.encoder.assemble(&plan, b"split", &mut plaintext);
+        node.encoder.commit(&plan);
+        let mut wire = Vec::new();
+        node.downlink
+            .seal(ContentType::ApplicationData, &plaintext, &mut wire)
+            .expect("seal");
+        for chunk in wire.chunks(3) {
+            node.stream.write_all(chunk).await.expect("chunk");
+        }
+
+        let mut buffer = [0_u8; 8];
+        let read = session.read(&mut buffer).await.expect("reads");
+        assert_eq!(&buffer[..read], b"split");
+        assert_eq!(session.incoming_len, 0);
+    }
+
     #[tokio::test]
     async fn downlink_payload_arrives_across_frames_and_records() {
         let (mut session, mut node) = answered().await;
@@ -1338,7 +1383,7 @@ mod tests {
             .expect("an empty read must not wait for a TLS record")
             .expect("empty read");
         assert!(!session.peer_closed());
-        assert!(session.incoming.is_empty());
+        assert_eq!(session.incoming_len, 0);
     }
 
     #[tokio::test]
@@ -1450,6 +1495,21 @@ mod tests {
             received.extend(node.receive_frame().await);
         }
         assert_eq!(received, payload[..accepted]);
+    }
+
+    /// One relay chunk is exactly four frame capacities, so it never spills
+    /// into a fifth, nearly empty record that would waste the key's record
+    /// budget. This ties the buffer size to the batching policy in one place.
+    #[tokio::test]
+    async fn one_relay_chunk_fits_whole_in_one_batch() {
+        let (mut session, _node) = answered().await;
+        let payload = vec![0_u8; crate::transport::RELAY_BUFFER];
+        let accepted = session.write(&payload).await.expect("bulk write");
+        assert_eq!(
+            accepted,
+            payload.len(),
+            "four full frames must absorb the whole relay chunk"
+        );
     }
 
     /// The session keeps draining records that are already buffered, so one

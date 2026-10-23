@@ -73,6 +73,42 @@ class Source(socketserver.BaseRequestHandler):
             left -= min(left, len(BLOCK))
 
 
+class StallSink(socketserver.BaseRequestHandler):
+    size = 0
+    pause_after = 0
+    pause_seconds = 0.0
+
+    def handle(self):
+        digest = hashlib.sha256()
+        left = self.size
+        received = 0
+        paused = False
+        while left:
+            data = self.request.recv(min(left, len(BLOCK)))
+            if not data:
+                raise EOFError('stall upload truncated')
+            digest.update(data)
+            left -= len(data)
+            received += len(data)
+            if not paused and received >= self.pause_after:
+                paused = True
+                time.sleep(self.pause_seconds)
+        self.request.sendall(digest.digest())
+
+
+class EofSink(socketserver.BaseRequestHandler):
+    size = 0
+
+    def handle(self):
+        digest = hashlib.sha256()
+        while True:
+            data = self.request.recv(len(BLOCK))
+            if not data:
+                break
+            digest.update(data)
+        self.request.sendall(digest.digest())
+
+
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -159,7 +195,7 @@ fingerprint = "chrome"
     return path
 
 
-def upload(proxy_port, target_port, size, expected):
+def upload(proxy_port, target_port, size, expected, half_close=False):
     sock = socks_connect(proxy_port, '127.0.0.1', target_port)
     try:
         left = size
@@ -167,6 +203,8 @@ def upload(proxy_port, target_port, size, expected):
             chunk = BLOCK[:min(left, len(BLOCK))]
             sock.sendall(chunk)
             left -= len(chunk)
+        if half_close:
+            sock.shutdown(socket.SHUT_WR)
         actual = recv_exact(sock, 32)
         if actual != expected:
             raise AssertionError('upload digest mismatch')
@@ -244,7 +282,14 @@ def main():
     Source.size = size
     sink = Server(('127.0.0.1', 0), Sink)
     source = Server(('127.0.0.1', 0), Source)
-    for server in (sink, source):
+    check_size = min(size, 16 * 1024 * 1024)
+    StallSink.size = check_size
+    StallSink.pause_after = 1024 * 1024
+    StallSink.pause_seconds = 2.0
+    EofSink.size = check_size
+    stall = Server(('127.0.0.1', 0), StallSink)
+    eof = Server(('127.0.0.1', 0), EofSink)
+    for server in (sink, source, stall, eof):
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
     proxy_port = free_port()
@@ -302,6 +347,26 @@ def main():
                 report['transfers'].append(entry)
                 print(json.dumps(entry), flush=True)
 
+        check_expected = expected_digest(check_size)
+        begin = time.monotonic()
+        upload(proxy_port, stall.server_address[1], check_size, check_expected)
+        stall_seconds = time.monotonic() - begin
+        report['stall'] = {
+            'mib': check_size // (1024 * 1024),
+            'pause_seconds': StallSink.pause_seconds,
+            'elapsed_seconds': stall_seconds,
+            'passed': stall_seconds >= StallSink.pause_seconds * 0.75,
+        }
+        print(json.dumps(report['stall']), flush=True)
+
+        begin = time.monotonic()
+        upload(proxy_port, eof.server_address[1], check_size, check_expected, half_close=True)
+        report['half_close'] = {
+            'mib': check_size // (1024 * 1024),
+            'elapsed_seconds': time.monotonic() - begin,
+        }
+        print(json.dumps(report['half_close']), flush=True)
+
         stop.set()
         sampler.join(5)
         echo_host, echo_port = values['RRC_INTEROP_ECHO'].rsplit(':', 1)
@@ -333,9 +398,10 @@ def main():
             assert after['rss_kib'] <= before['rss_kib'] + 64 * 1024, (before, after)
         assert report['latency']['p99_ms'] < 250, report['latency']
         assert report['setup']['p95_ms'] < 5000, report['setup']
+        assert report['stall']['passed'], report['stall']
         report['passed'] = True
     finally:
-        for server in (sink, source):
+        for server in (sink, source, stall, eof):
             server.shutdown()
             server.server_close()
         if client.poll() is None:
@@ -350,6 +416,8 @@ def main():
         print(json.dumps({'passed': report['passed'],
                           'latency': report.get('latency'),
                           'setup': report.get('setup'),
+                          'stall': report.get('stall'),
+                          'half_close': report.get('half_close'),
                           'resources': report.get('resources')}, indent=2))
 
 

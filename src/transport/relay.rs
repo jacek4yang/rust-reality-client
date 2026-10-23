@@ -32,10 +32,11 @@
 //! [`configure`](crate::transport::socket::configure) makes the dead ones
 //! observable instead.
 //!
-//! **A fixed cost per connection.** One [`RELAY_BUFFER`]-sized buffer per
-//! direction, allocated when the copy starts and reused for every chunk, so a
-//! relay holds 64 KiB regardless of how much it moves. That is the number the
-//! inbound's connection limits multiply against.
+//! **A fixed cost per connection.** One [`RELAY_BUFFER`]-sized uplink buffer and
+//! one [`DOWNLINK_BUFFER`]-sized downlink buffer, allocated when the copy starts
+//! and reused for every chunk, so a relay holds about 65 KiB regardless of how
+//! much it moves. That is the number the inbound's connection limits multiply
+//! against.
 //!
 //! [`carry`] never moves a session. Which node a connection belongs to is
 //! settled before the first byte flows (see [`handoff`](crate::handoff)); by the
@@ -49,15 +50,25 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional_with_sizes};
 
 use crate::error::{Error, TransportError};
 
+/// Vision frames one relay chunk is sized for.
+pub(crate) const UPLINK_BATCH_FRAMES: usize = 4;
+
 /// Bytes one direction of a relay moves at a time.
 ///
-/// This is the copy primitive's own default (`DEFAULT_BUF_SIZE`,
-/// `tokio-1.53.1/src/io/util/mod.rs:88`) multiplied up to one uplink batch: a
-/// relay chunk is four Vision frames (`VISION_FRAME_SIZE`, 8 KiB each), and the
-/// session seals that batch into one socket write. Small chunks cost a read and
-/// a write per 8 KiB, which dominates bulk upload; nothing is buffered here
-/// beyond what one bounded batch already holds.
-pub const RELAY_BUFFER: usize = 32 * 1024;
+/// This is exactly [`UPLINK_BATCH_FRAMES`] full frame contents
+/// ([`FRAME_CONTENT_CAPACITY`](crate::protocol::vision::FRAME_CONTENT_CAPACITY)).
+/// Sizing it to a power of two instead leaves a few bytes over, and those bytes
+/// become a fifth, nearly empty record on every chunk: about 25 % of the traffic
+/// key's record budget wasted on a fast stream. Four full frames fit the chunk
+/// with no remainder, so every record carries its full capacity.
+pub const RELAY_BUFFER: usize = UPLINK_BATCH_FRAMES * crate::protocol::vision::FRAME_CONTENT_CAPACITY;
+
+/// Bytes one downlink read hands to the local socket.
+///
+/// A downlink record carries at most [`MAX_PLAINTEXT_LEN`](crate::protocol::tls13::MAX_PLAINTEXT_LEN)
+/// bytes, so two records fill this exactly. A buffer that is not a multiple of
+/// the record size leaves a few bytes to write separately after every pair.
+pub const DOWNLINK_BUFFER: usize = 2 * crate::protocol::tls13::MAX_PLAINTEXT_LEN;
 
 /// What one relay carried before both directions closed.
 ///
@@ -97,7 +108,7 @@ where
     R: AsyncRead + AsyncWrite + Unpin,
 {
     let (to_remote, to_local) =
-        copy_bidirectional_with_sizes(local, remote, RELAY_BUFFER, RELAY_BUFFER).await?;
+        copy_bidirectional_with_sizes(local, remote, RELAY_BUFFER, DOWNLINK_BUFFER).await?;
     Ok(Transferred {
         to_remote,
         to_local,

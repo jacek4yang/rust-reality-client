@@ -698,7 +698,7 @@ everything, and what each socket is proved to hold.
   The mechanism split the section exists to make explicit: **A** bounded setup
   (`DNS_BUDGET` 5 s, `CONNECT_BUDGET` 10 s, `FIRST_BYTE_BUDGET` 15 s), **B** kernel
   liveness (30/10/3 plus the system's retransmission budget), **C** pending writes
-  (no timer here, and a fixed 32 KiB buffer per direction that cannot grow — a stalled
+  (no timer here, and fixed relay buffers that cannot grow — a stalled
   writer stops pulling instead of queueing), **D** application deadlines and
   heartbeats, which this proxy neither imposes nor impersonates: a WebSocket Ping,
   Pong or Close is payload, carried byte for byte and never synthesised here. A
@@ -707,12 +707,13 @@ everything, and what each socket is proved to hold.
 
 - [x] **37. The hot path's cost is fixed and greppable.**
 
-  `RELAY_BUFFER` is 32 KiB per direction (`src/transport/relay.rs:60`), and the copy is
-  tokio's `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
+  `RELAY_BUFFER` is 32,748 bytes uplink and `DOWNLINK_BUFFER` 32,768
+  (`src/transport/relay.rs:64-71`), and the copy is tokio's
+  `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
   connection and reuses them for every chunk. A Vision session holds four buffers,
-  each reserved at construction (`src/transport/session.rs:262-268`), including one
-  full uplink batch for `outgoing`; the three `resize` calls in that file grow
-  within those reservations. The codec's production
+  each allocated once at construction (`src/transport/session.rs:260-269`),
+  including one full uplink batch for `outgoing`; later `resize`/fill calls
+  reuse those reservations or the fixed incoming buffer. The codec's production
   region allocates nothing — no `Vec::new`, `to_vec`, `format!` or `clone` anywhere
   above the test module at `src/protocol/vision.rs:579` — and nothing in
   `relay.rs`, `session.rs` or `vision.rs` logs:
