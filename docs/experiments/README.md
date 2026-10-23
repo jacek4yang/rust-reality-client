@@ -497,8 +497,10 @@ single-stream shape and a three-round 8 × 32 MiB shape:
 The sixteen-frame batch is the delivered setting. It reserves about 190 KiB of
 relay buffers and about 130 KiB of session batch per connection, so the
 256-connection ceiling is about 48 MiB of relay memory; measured RSS with eight
-active streams stayed under 8.1 MiB. Wider batches showed diminishing returns
-and were not adopted.
+active streams stayed under 8.1 MiB. A thirty-two-frame batch (261,984 B) was
+also measured; it reached 1010/730 MiB/s single-stream and 2021/2035 MiB/s at
+eight streams, below the sixteen-frame result, so the wider batch was rejected.
+Wider batches show diminishing or negative returns.
 
 `latency_compare.py` runs three alternating rounds of 1000 ping-pongs and 50
 fresh connections through each client:
