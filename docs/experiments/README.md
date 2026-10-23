@@ -375,8 +375,8 @@ endpoints and a TLS-bearing workload.
 
 ## TLS origins, concurrency and stability, 2026-10-24
 
-The optimized client (binary SHA-256
-`47dbbe213d37350fb97221b1b466097b4ff2de707c60d5e77059e72518ad521c`) was
+The final client (binary SHA-256
+`53df639002c278d99b7b8161314216f52f0e6825da8c9b7e0b809b6dcc77cf71`) was
 measured against the same rust-reality `main` node and official Xray 26.10.21.
 `bulk_profile.py` (64 MiB per transfer) runs through the fixture's real TLS 1.3
 and TLS 1.2 origins over one connection; values are medians of two rounds in
@@ -384,12 +384,12 @@ MiB/s:
 
 | Origin | Client | Upload | Download |
 |---|---|---:|---:|
-| TLS 1.3 | Optimized | 599 | 495 |
-| TLS 1.3 | Xray 26.10.21 | 223 | 499 |
-| TLS 1.2 | Optimized | 616 | 565 |
-| TLS 1.2 | Xray 26.10.21 | 550 | 525 |
-| TLS 1.3 | Direct fixture control | 722 | 756 |
-| TLS 1.2 | Direct fixture control | 636 | 726 |
+| TLS 1.3 | Optimized | 584 | 532 |
+| TLS 1.3 | Xray 26.10.21 | 236 | 513 |
+| TLS 1.2 | Optimized | 727 | 588 |
+| TLS 1.2 | Xray 26.10.21 | 614 | 571 |
+| TLS 1.3 | Direct fixture control | 730 | 759 |
+| TLS 1.2 | Direct fixture control | 718 | 800 |
 
 The direct control bypasses the proxy, so it measures the Python TLS/hashing
 fixture and is neither an upper bound nor a proxy result. The four-connection
@@ -397,17 +397,17 @@ rows are omitted on purpose: the direct arm also fell to 168–203 MiB/s, which
 means the Python fixture, not either client, bounded that run.
 
 Eight concurrent 32 MiB streams through the same server (`raw_throughput.py
---concurrency 8`, three rounds):
+--concurrency 8`, three rounds, final batch):
 
 | Client | Aggregate upload MiB/s | Aggregate download MiB/s | Sampled RSS KiB |
 |---|---:|---:|---:|
-| Optimized | 1843 | 1804 | 7400 |
-| Xray 26.10.21 | 1801 | 389 | 36200 |
+| Optimized | 2219 | 2138 | 8100 |
+| Xray 26.10.21 | 1880 | 403 | 36200 |
 
-One Xray upload round contained a 29 MiB/s straggler; the other two aggregated
-1801–1860 MiB/s. Xray's download aggregate was 389–399 MiB/s in every round.
-Upload is therefore parity at eight streams, download is 4.6x, and the client
-holds about one fifth of the RSS.
+Another Xray upload round contained a 29 MiB/s straggler; this three-round set
+aggregated 1862–2027 MiB/s. Xray's download aggregate was 391–408 MiB/s in all
+rounds. Upload is therefore slightly ahead at eight streams, download is 5.3x,
+and the client holds about one fifth of the RSS.
 
 `scripts/interop/bulk_stability.py` is the CI gate (two rounds of eight 64 MiB
 streams, every byte digest-checked). On the local WSL host it moved 358–385
