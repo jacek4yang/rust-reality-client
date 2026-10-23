@@ -342,7 +342,8 @@ The tuning raises the relay buffer from 8 KiB to 32 KiB and seals up to four
 8 KiB Vision frames into one socket write (`src/transport/relay.rs`,
 `VisionSession::poll_write`). The outgoing batch remains the backpressure bound:
 a stalled socket makes the next write wait, so buffering does not grow with the
-transfer. Two independent five-round series of the tuned binary (SHA-256
+transfer; its capacity is reserved with the session. Two independent five-round
+series of the tuned build (SHA-256
 `2a6fe9f1fdaeab962358a72fc88dfd4b2b9be17ea35824006f08589ea14f6652`):
 
 | Series | Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | CPU s per 256 MiB up/down | Sampled RSS KiB |
@@ -352,12 +353,22 @@ transfer. Two independent five-round series of the tuned binary (SHA-256
 | B | Tuned | 709.0 (659.5–756.6) | 813.9 (727.1–849.7) | 0.34 / 0.31 | 5480 |
 | B | Xray 26.10.21 | 587.5 (561.4–591.1) | 303.6 (296.1–306.7) | 0.45 / 0.36 | 31812 |
 
-The absolute rates move with host load, but the relative result repeats: the
-tuned client uploads 1.19–1.21x Xray's rate and downloads 2.68–2.86x, while
-spending less CPU per 256 MiB in both directions and holding about one sixth of
-the RSS. Each connection now reserves 64 KiB of relay buffers instead of 16 KiB.
-Two alternating clients on one loopback host, Python endpoints and no TLS origin
-mean these numbers do not establish WAN, application-level, or production
-superiority. They are not comparable with the user's separate Xray-to-Xray
-854 MiB/s application result, which used different endpoints and a TLS-bearing
-workload.
+Three later five-round series of the final build (SHA-256
+`988abfa5e469a0640722a1093b64b180e4631b5a4fd3e48884face8c313a26c1`), which
+also reserves the batch capacity at construction, ran while the shared host was
+busier: Xray's own rates fell, so this is a host-load shift rather than a client
+regression. Median upload/download pairs were 581.3/389.2, 627.0/433.4 and
+609.3/472.1 MiB/s for the tuned client, against 532.1/265.1, 523.7/260.7 and
+533.1/262.2 MiB/s for Xray. The ordering held in every series: upload
+1.09–1.21x Xray and download 1.46–2.86x across all five.
+
+The absolute rates move with host load; only the relative ordering repeated.
+In the lighter series the tuned client also spent less CPU per 256 MiB in both
+directions. On the busier host its upload CPU stayed lower, while its download
+CPU was somewhat higher per byte even as it moved 1.5–1.8x the bytes. Each
+connection now reserves 64 KiB of relay buffers instead of 16 KiB, plus one
+bounded uplink batch. Two alternating clients on one loopback host, Python
+endpoints and no TLS origin mean these numbers do not establish WAN,
+application-level, or production superiority. They are not comparable with the
+user's separate Xray-to-Xray 854 MiB/s application result, which used different
+endpoints and a TLS-bearing workload.

@@ -66,7 +66,7 @@ use crate::protocol::tls13::{
     RecordLayer,
 };
 use crate::protocol::vision::{
-    Command, DecodeError, Decoder, EncodeError, Encoder, FramePlan, Mode,
+    Command, DecodeError, Decoder, EncodeError, Encoder, FRAME_SIZE, FramePlan, Mode,
 };
 use crate::protocol::vless::{self, Destination, VISION_FLOW};
 
@@ -110,11 +110,13 @@ pub enum Downlink {
 /// One session is one TCP connection to one node. Dropping it abandons the
 /// tunnel; [`AsyncWrite::poll_shutdown`] is what closes the uplink orderly.
 ///
-/// Reads and writes are buffered by exactly one record in each direction:
-/// [`MAX_RECORD_WIRE_LEN`] bytes of socket input plus one record's payload, and
-/// one sealed record waiting for the socket. Once the downlink is
-/// [`Downlink::Direct`] the read side holds nothing at all and copies the socket
-/// straight to its caller, so nothing here grows with the transfer either way.
+/// Reads and writes are bounded in each direction: [`MAX_RECORD_WIRE_LEN`] bytes
+/// of socket input plus one record's payload, and at most one sealed uplink
+/// batch ([`UPLINK_BATCH_FRAMES`] records) waiting for the socket. The batch's
+/// capacity is reserved at construction, so a bulk transfer does not grow it.
+/// Once the downlink is [`Downlink::Direct`] the read side holds nothing at all
+/// and copies the socket straight to its caller, so nothing here grows with the
+/// transfer either way.
 pub struct VisionSession<S> {
     stream: S,
     negotiated: Negotiated,
@@ -260,7 +262,9 @@ where
             incoming: Vec::with_capacity(MAX_RECORD_WIRE_LEN),
             readable: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             readable_at: 0,
-            outgoing: Vec::with_capacity(MAX_RECORD_WIRE_LEN),
+            outgoing: Vec::with_capacity(
+                UPLINK_BATCH_FRAMES * RecordLayer::record_wire_len(FRAME_SIZE),
+            ),
             frame: Vec::with_capacity(MAX_PLAINTEXT_LEN),
             response: [0; RESPONSE_LEN],
             response_at: 0,
@@ -778,7 +782,7 @@ mod tests {
     use super::*;
     use crate::protocol::reality::X25519_GROUP;
     use crate::protocol::tls13::{CipherSuite, HashAlgorithm, KeySchedule, TranscriptHash};
-    use crate::protocol::vision::{FRAME_SIZE, Mode};
+    use crate::protocol::vision::Mode;
 
     const USER: [u8; 16] = [0x11; 16];
     const SUITE: CipherSuite = CipherSuite::Aes128GcmSha256;

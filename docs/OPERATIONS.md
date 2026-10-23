@@ -184,7 +184,7 @@ more stable connection — they get a different failure. The names and values, a
 | `MAX_CANDIDATES` / `MAX_IN_FLIGHT` | 16 / 2 | addresses per name, dials at once |
 | `KEEPALIVE_IDLE` / `_INTERVAL` / `_COUNT` | 30 s / 10 s / 3 | the kernel probes on a node session |
 | `FIRST_BYTE_BUDGET` | 15 s | what the application waits for a tunnel |
-| `RELAY_BUFFER` / `MAX_HEAD_LEN` | 8 KiB / 8 KiB | per-direction copy, request head read |
+| `RELAY_BUFFER` / `MAX_HEAD_LEN` | 32 KiB / 8 KiB | per-direction copy, request head read |
 
 If one of these genuinely needs to change for your network, change it in the source and
 rebuild; the value you wrote in a file would have told you nothing about what it cost.
@@ -465,12 +465,13 @@ injects one of its own to make a dead session look alive.
 
 ### The hot path's fixed cost
 
-* 8 KiB per direction (`RELAY_BUFFER`, `src/transport/relay.rs:57`), allocated once
-  per connection by the copy loop and reused for every chunk. A relay holds 16 KiB
+* 32 KiB per direction (`RELAY_BUFFER`, `src/transport/relay.rs:60`), allocated once
+  per connection by the copy loop and reused for every chunk. A relay holds 64 KiB
   regardless of how much it moves.
 * A Vision session holds four buffers, each `Vec::with_capacity` at construction
-  (`src/transport/session.rs:253-257`); the three `resize` calls in the same file
-  only ever grow within that capacity.
+  (`src/transport/session.rs:262-268`); `outgoing` is reserved for one full
+  four-record uplink batch, and the three `resize` calls in the same file only
+  ever grow within that capacity.
 * No allocation in the Vision codec's production path, no logging in
   `relay.rs`/`session.rs`/`vision.rs`, and no timer armed per chunk. These are
   grep-checkable rather than aspirational:
