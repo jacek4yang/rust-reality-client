@@ -72,6 +72,13 @@ use crate::protocol::vless::{self, Destination, VISION_FLOW};
 
 /// Size of the VLESS response header, which is the tunnel's readiness signal.
 const RESPONSE_LEN: usize = 2;
+/// Vision frames sealed into one socket write.
+///
+/// The relay hands over a 32 KiB chunk; framing it as four 8 KiB records and
+/// flushing them together removes three write syscalls per chunk without
+/// changing the wire format. At most one batch is ever queued, so a stalled
+/// socket still applies backpressure on the next `poll_write`.
+const UPLINK_BATCH_FRAMES: usize = 4;
 /// Alert description the server reads as an orderly half-close
 /// (`tls13/application_io.rs:13`).
 const CLOSE_NOTIFY: u8 = 0;
@@ -586,10 +593,11 @@ impl<S> AsyncWrite for VisionSession<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Frames at most one `write` call's bytes into one Vision frame.
+    /// Frames one `write` call's bytes into at most [`UPLINK_BATCH_FRAMES`]
+    /// records and flushes them together.
     ///
-    /// One record in flight is the uplink bound: accepting more would buffer
-    /// without limit and hide a stalled socket from the writer above.
+    /// The batch is the uplink bound: accepting more would buffer without limit
+    /// and hide a stalled socket from the writer above.
     fn poll_write(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -615,21 +623,29 @@ where
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let taken = buf.len().min(this.encoder.max_content());
-        let plan = match this.encoder.plan(taken, Command::Continue, true) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return Poll::Ready(Err(into_io_error(&this.fail(encoding_failure(error)))));
+        let mut accepted = 0;
+        for _ in 0..UPLINK_BATCH_FRAMES {
+            if accepted == buf.len() {
+                break;
             }
-        };
-        this.frame.clear();
-        this.frame.resize(plan.wire_len(), 0);
-        this.encoder.assemble(&plan, &buf[..taken], &mut this.frame);
-        this.encoder.commit(&plan);
-        if let Err(error) = this.seal_frame(ContentType::ApplicationData) {
-            return Poll::Ready(Err(into_io_error(&error)));
+            let taken = (buf.len() - accepted).min(this.encoder.max_content());
+            let plan = match this.encoder.plan(taken, Command::Continue, true) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    return Poll::Ready(Err(into_io_error(&this.fail(encoding_failure(error)))));
+                }
+            };
+            this.frame.clear();
+            this.frame.resize(plan.wire_len(), 0);
+            this.encoder
+                .assemble(&plan, &buf[accepted..accepted + taken], &mut this.frame);
+            this.encoder.commit(&plan);
+            if let Err(error) = this.seal_frame(ContentType::ApplicationData) {
+                return Poll::Ready(Err(into_io_error(&error)));
+            }
+            accepted += taken;
         }
-        // Push the record at once. A proxy's writer may not sit on bytes until the
+        // Push the batch at once. A proxy's writer may not sit on bytes until the
         // caller thinks to flush: `copy_bidirectional` only flushes each half when
         // it stops copying, and an HTTP request would never reach the node. A
         // `Pending` here is not a failure: the bytes are accepted, and the next
@@ -637,7 +653,7 @@ where
         if let Poll::Ready(Err(error)) = this.poll_flush_outgoing(context) {
             return Poll::Ready(Err(into_io_error(&error)));
         }
-        Poll::Ready(Ok(taken))
+        Poll::Ready(Ok(accepted))
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -762,7 +778,7 @@ mod tests {
     use super::*;
     use crate::protocol::reality::X25519_GROUP;
     use crate::protocol::tls13::{CipherSuite, HashAlgorithm, KeySchedule, TranscriptHash};
-    use crate::protocol::vision::Mode;
+    use crate::protocol::vision::{FRAME_SIZE, Mode};
 
     const USER: [u8; 16] = [0x11; 16];
     const SUITE: CipherSuite = CipherSuite::Aes128GcmSha256;
@@ -1374,6 +1390,31 @@ mod tests {
             received.extend(node.receive_frame().await);
         }
         assert_eq!(received, payload);
+    }
+
+    /// One bulk write is sealed as several frames in one batch, and every byte
+    /// still arrives once and in order. This is the shape the relay relies on to
+    /// avoid a socket write per 8 KiB; a batching bug would show up here as a
+    /// short accept or a reordered stream, not just as slower throughput.
+    #[tokio::test]
+    async fn one_bulk_write_is_sealed_as_one_bounded_batch() {
+        let (mut session, mut node) = answered().await;
+        let payload: Vec<u8> = (0..=250_u8).cycle().take(BULK).collect();
+        let accepted = session.write(&payload).await.expect("bulk write");
+        assert!(
+            accepted > FRAME_SIZE - 5 - 16,
+            "one call seals more than one frame: {accepted}"
+        );
+        assert!(
+            accepted <= UPLINK_BATCH_FRAMES * FRAME_SIZE,
+            "the batch stays bounded: {accepted}"
+        );
+
+        let mut received = Vec::new();
+        while received.len() < accepted {
+            received.extend(node.receive_frame().await);
+        }
+        assert_eq!(received, payload[..accepted]);
     }
 
     /// Half-close is the alert the node reads as a destination `FIN`, followed by

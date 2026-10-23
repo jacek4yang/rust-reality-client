@@ -34,7 +34,7 @@
 //!
 //! **A fixed cost per connection.** One [`RELAY_BUFFER`]-sized buffer per
 //! direction, allocated when the copy starts and reused for every chunk, so a
-//! relay holds 16 KiB regardless of how much it moves. That is the number the
+//! relay holds 64 KiB regardless of how much it moves. That is the number the
 //! inbound's connection limits multiply against.
 //!
 //! [`carry`] never moves a session. Which node a connection belongs to is
@@ -52,11 +52,12 @@ use crate::error::{Error, TransportError};
 /// Bytes one direction of a relay moves at a time.
 ///
 /// This is the copy primitive's own default (`DEFAULT_BUF_SIZE`,
-/// `tokio-1.53.1/src/io/util/mod.rs:88`) and the size v2.0.1 frames Vision at
-/// (`VISION_FRAME_SIZE`, `src/protocol/vless/vision.rs:6`), so a relay chunk is
-/// also a session record: nothing is buffered here that the tunnel would have
-/// split anyway.
-pub const RELAY_BUFFER: usize = 8 * 1024;
+/// `tokio-1.53.1/src/io/util/mod.rs:88`) multiplied up to one uplink batch: a
+/// relay chunk is four Vision frames (`VISION_FRAME_SIZE`, 8 KiB each), and the
+/// session seals that batch into one socket write. Small chunks cost a read and
+/// a write per 8 KiB, which dominates bulk upload; nothing is buffered here
+/// beyond what one bounded batch already holds.
+pub const RELAY_BUFFER: usize = 32 * 1024;
 
 /// What one relay carried before both directions closed.
 ///

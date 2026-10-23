@@ -317,3 +317,47 @@ Runtime remains c1fdd8e; the musl package is the verified executable from CI
 The real 24-hour run began 2026-10-04 05:57 UTC. Its incremental progress is not a
 pass. A completed report and unchanged-runtime manifest are mandatory before
 publication. This section will be updated once that run terminates.
+
+## Raw TCP client/tunnel throughput, 2026-10-23/24
+
+`scripts/experiments/raw_throughput.py` compares this client and official Xray
+26.10.21 as SOCKS5 clients against the same unmodified rust-reality `main`
+server, commit `6b87633` (binary SHA-256
+`c702961fb21d590232493c9f46f8407014b2269eb386b674e2bead09d610bf11`). Both use
+REALITY + Vision and the `chrome` fingerprint. Each series is five rounds of
+256 MiB per direction, alternating order, on a 16-vCPU WSL2 loopback with kernel
+6.18.33.1-microsoft-standard-WSL2. The sink and source are local Python servers
+and the traffic is raw TCP with no TLS origin.
+
+The first series measured the pre-tuning client at HEAD `ba4d401` (binary
+SHA-256 `495f2d6656bf032e41a262181f3a197b5382ff7a6a943db508e5ce7e6cc16e7f`).
+It showed the upload gap that motivated the tuning:
+
+| Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | CPU s per 256 MiB up/down | Sampled RSS KiB |
+|---|---:|---:|---:|---:|
+| Pre-tuning | 392.1 (375.1–405.0) | 625.7 (571.9–701.4) | 0.64 / 0.40 | 5432 |
+| Xray 26.10.21 | 599.6 (584.8–683.1) | 303.3 (295.0–312.6) | 0.44 / 0.36 | 32028 |
+
+The tuning raises the relay buffer from 8 KiB to 32 KiB and seals up to four
+8 KiB Vision frames into one socket write (`src/transport/relay.rs`,
+`VisionSession::poll_write`). The outgoing batch remains the backpressure bound:
+a stalled socket makes the next write wait, so buffering does not grow with the
+transfer. Two independent five-round series of the tuned binary (SHA-256
+`2a6fe9f1fdaeab962358a72fc88dfd4b2b9be17ea35824006f08589ea14f6652`):
+
+| Series | Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | CPU s per 256 MiB up/down | Sampled RSS KiB |
+|---|---|---:|---:|---:|---:|
+| A | Tuned | 759.6 (713.0–803.2) | 860.3 (778.8–897.6) | 0.32 / 0.30 | 5532 |
+| A | Xray 26.10.21 | 640.7 (617.4–673.8) | 301.2 (296.2–307.1) | 0.41 / 0.36 | 32212 |
+| B | Tuned | 709.0 (659.5–756.6) | 813.9 (727.1–849.7) | 0.34 / 0.31 | 5480 |
+| B | Xray 26.10.21 | 587.5 (561.4–591.1) | 303.6 (296.1–306.7) | 0.45 / 0.36 | 31812 |
+
+The absolute rates move with host load, but the relative result repeats: the
+tuned client uploads 1.19–1.21x Xray's rate and downloads 2.68–2.86x, while
+spending less CPU per 256 MiB in both directions and holding about one sixth of
+the RSS. Each connection now reserves 64 KiB of relay buffers instead of 16 KiB.
+Two alternating clients on one loopback host, Python endpoints and no TLS origin
+mean these numbers do not establish WAN, application-level, or production
+superiority. They are not comparable with the user's separate Xray-to-Xray
+854 MiB/s application result, which used different endpoints and a TLS-bearing
+workload.
