@@ -69,20 +69,22 @@ the interop gate runs.
 | Inbound accepted by the node | VLESS `TCP` + `flow: xtls-rprx-vision` |
 | REALITY key groups | `X25519` (`0x001d`) and `X25519MLKEM768` (`0x11ec`) |
 | Authentication | AES-256-GCM / ChaCha20-Poly1305 record AEAD, `REALITY` HKDF label, 16-byte plaintext, 20-byte nonce offset — as `v2.0.1` reads them |
-| ALPN | offered, and tolerated when absent |
+| ALPN | offered with the profile's list, and tolerated when absent |
+| ClientHello fingerprint | 12 modern browser shapes plus `random`, `randomized` and `randomizednoalpn`, selected per node; source-pinned to uTLS `aa6edf4…` and documented in [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md) |
 | Vision | `Continue` / `End` / `Direct` decision, 8 KiB frames, the padding distributions the server produces |
 | Timestamp tolerance | the node's own `maxTimeDiffMs` default (60 000 ms) |
-| UDP, MUX, `x25519` fingerprints, other flows | **not** implemented, because `v2.0.1` does not accept them |
+| UDP, MUX, other flows | **not** implemented, because `v2.0.1` does not accept them |
 
 Wire behaviour is derived from the upstream source and proven by tests, not from
 memory: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) records the exact upstream file
-and line for each requirement, and `tests/interop_v201.rs` runs 22 live tests
-against the real node (handshake, foreign-key rejection, a Vision round trip
-through the echo target, half-close, both inbounds, the scheduler routing past a
-node that cannot authenticate, five destination fault shapes, a nested TLS 1.2
-and a nested TLS 1.3 destination with the record-layer transition each one
-provokes, an idle tunnel held past the keepalive window, a session quiet past
-that same window, a connect storm, and a soak).
+and line for each requirement, and `tests/interop_v201.rs` runs 23 live tests
+against the real node (handshake, every supported fingerprint shape,
+foreign-key rejection, a Vision round trip through the echo target, half-close,
+both inbounds, the scheduler routing past a node that cannot authenticate, five
+destination fault shapes, a nested TLS 1.2 and a nested TLS 1.3 destination
+with the record-layer transition each one provokes, an idle tunnel held past
+the keepalive window, a session quiet past that same window, a connect storm,
+and a soak).
 
 `cargo test --locked --test interop_v201 -- --ignored --test-threads=1` is the
 gate, and CI's `interop` job runs it against a node built from the commit above
@@ -186,9 +188,9 @@ value:
   reported rather than silently merged.
 * Every problem in the file is reported in one pass, so `check` is a work list
   and not a lottery.
-* Keys Xray uses (`pbk`, `sni`, `sid`, `fp`, `flow`) are refused with the
-  equivalent in this grammar, because a migrated file is the most likely way to
-  arrive here with a wrong shape.
+* Keys Xray uses (`pbk`, `sni`, `sid`, `fp`, `flow`) are refused as written
+  with the equivalent in this grammar; `fp` points at `fingerprint`, and a
+  migrated file is the most likely way to arrive here with a wrong shape.
 
 Leaving `[listen]` out entirely gives the mandated `127.0.0.1:10808` /
 `127.0.0.1:10809` pair.

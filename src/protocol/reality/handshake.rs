@@ -132,8 +132,8 @@ impl fmt::Debug for Handshake {
 /// Completes the TLS 1.3 continuation over a stream that already carries our
 /// `ClientHello` record.
 ///
-/// `offered_alpn` must be exactly the list the hello carried, because the
-/// server's `EncryptedExtensions` may claim one of those protocols.
+/// The offered ALPN list is read from `hello`, so it is always exactly what
+/// the wire carried, including an empty list for `randomizednoalpn`.
 ///
 /// # Errors
 ///
@@ -147,7 +147,6 @@ pub async fn complete<S>(
     hello: &HelloRecord,
     keys: &ClientKeyAgreement,
     auth_key: &AuthKey,
-    offered_alpn: &[&[u8]],
 ) -> Result<Handshake, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -174,7 +173,8 @@ where
     let mut flight = MessageBuffer::new();
     let encrypted_extensions =
         next_message(stream, &mut scratch, &mut server_records, &mut flight).await?;
-    let alpn = parse_encrypted_extensions(&encrypted_extensions, offered_alpn)?;
+    let offered: Vec<&[u8]> = hello.alpn().iter().map(Vec::as_slice).collect();
+    let alpn = parse_encrypted_extensions(&encrypted_extensions, &offered)?;
     hasher.update(&encrypted_extensions);
 
     let certificate = next_message(stream, &mut scratch, &mut server_records, &mut flight).await?;
@@ -428,6 +428,7 @@ mod tests {
 
     use super::*;
     use crate::crypto::EphemeralX25519;
+    use crate::protocol::reality::Fingerprint;
     use crate::protocol::reality::auth::{AuthPlaintext, CLIENT_VERSION};
     use crate::protocol::reality::certificate::{
         HANDSHAKE_CERTIFICATE, HANDSHAKE_CERTIFICATE_VERIFY, HANDSHAKE_ENCRYPTED_EXTENSIONS,
@@ -437,7 +438,6 @@ mod tests {
     use crate::protocol::tls13::TrafficKeys;
 
     const NAME: &str = "www.example.com";
-    const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
     const SUITE: CipherSuite = CipherSuite::Aes256GcmSha384;
     const CCS_LEN: usize = CHANGE_CIPHER_SPEC_RECORD.len();
     const HANDSHAKE_SERVER_HELLO: u8 = 2;
@@ -583,15 +583,22 @@ mod tests {
     }
 
     fn client_start(node: &Node) -> (HelloRecord, ClientKeyAgreement, AuthKey) {
-        let keys = ClientKeyAgreement::generate().expect("key agreement");
+        let profile = Fingerprint::Chrome.resolve([2; 32]);
+        let keys = ClientKeyAgreement::generate(profile.needs_hybrid()).expect("key agreement");
         let plaintext = AuthPlaintext {
             version: CLIENT_VERSION,
             time: 1_700_000_000,
             short_id: [1, 2, 3, 4, 5, 6, 7, 8],
         };
-        build_client_hello(NAME, ALPN, &keys, node.reality_key.public_key(), plaintext)
-            .map(|(hello, auth_key)| (hello, keys, auth_key))
-            .expect("client hello")
+        build_client_hello(
+            NAME,
+            profile,
+            &keys,
+            node.reality_key.public_key(),
+            plaintext,
+        )
+        .map(|(hello, auth_key)| (hello, keys, auth_key))
+        .expect("client hello")
     }
 
     /// Plays the server half of a flight and returns the wire bytes plus the
@@ -752,7 +759,7 @@ mod tests {
         let (wire, peer) = build_flight(&node, &hello, &keys, &auth_key, claim_alpn, positional);
         let (mut client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
         server_stream.write_all(&wire).await.expect("flight fits");
-        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key, ALPN)
+        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key)
             .await
             .expect("handshake");
         let flight = collect_client_flight(&mut server_stream).await;
@@ -771,7 +778,7 @@ mod tests {
         // Closing the write side lets a client that needs more data see EOF
         // rather than hang.
         drop(server_stream);
-        complete(&mut client_stream, hello, keys, auth_key, ALPN)
+        complete(&mut client_stream, hello, keys, auth_key)
             .await
             .expect_err("the client must refuse this server")
     }
@@ -817,7 +824,7 @@ mod tests {
 
         let (mut client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
         server_stream.write_all(&wire).await.expect("flight fits");
-        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key, ALPN)
+        let handshake = complete(&mut client_stream, &hello, &keys, &auth_key)
             .await
             .expect("handshake");
         collect_client_flight(&mut server_stream).await;

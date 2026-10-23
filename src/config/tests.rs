@@ -11,6 +11,7 @@ use base64::Engine as _;
 
 use super::grammar::KEY_RULE;
 use super::{ConfigError, DEFAULT_HTTP, DEFAULT_SOCKS5, Problem};
+use crate::protocol::reality::Fingerprint;
 
 /// A public key as the handoff spells it.
 fn key(byte: u8) -> String {
@@ -110,6 +111,69 @@ fn a_valid_configuration_reads_back_what_the_operator_wrote() {
     );
     assert_eq!(config.listen.socks5.unwrap().port(), 10_808);
     assert_eq!(config.listen.http.unwrap().port(), 10_809);
+    assert_eq!(
+        Fingerprint::Chrome,
+        node.reality.fingerprint,
+        "chrome is the default"
+    );
+}
+
+#[test]
+fn fingerprint_names_and_aliases_are_read_and_unsupported_ones_are_explained() {
+    let firefox = valid().replace(
+        "serverName = \"www.example.com\"",
+        "serverName = \"www.example.com\"\nfingerprint = \"firefox\"",
+    );
+    assert_eq!(
+        Fingerprint::Firefox148,
+        super::parse(&firefox).expect("valid").nodes[0]
+            .reality
+            .fingerprint
+    );
+
+    let alias = valid().replace(
+        "serverName = \"www.example.com\"",
+        "serverName = \"www.example.com\"\nfingerprint = \"hellochrome_auto\"",
+    );
+    assert_eq!(
+        Fingerprint::Chrome133,
+        super::parse(&alias).expect("valid").nodes[0]
+            .reality
+            .fingerprint
+    );
+
+    for (name, expected) in [
+        ("android", "no TLS 1.3 key share"),
+        ("360", "7.5 shape"),
+        ("unsafe", "standard-library"),
+        ("hellochrome_58", "legacy"),
+        ("netscape", "must be one of"),
+    ] {
+        let text = valid().replace(
+            "serverName = \"www.example.com\"",
+            &format!("serverName = \"www.example.com\"\nfingerprint = \"{name}\""),
+        );
+        let problem = problem_at(&text, "node[0].reality.fingerprint");
+        assert!(
+            problem.message.contains(expected),
+            "{name}: {}",
+            problem.message
+        );
+    }
+}
+
+#[test]
+fn an_fp_key_points_at_the_fingerprint_field() {
+    let text = valid().replace(
+        "serverName = \"www.example.com\"",
+        "serverName = \"www.example.com\"\nfp = \"chrome\"",
+    );
+    let problem = problem_at(&text, "node[0].reality.fp");
+    assert!(
+        problem.message.contains("fingerprint"),
+        "{}",
+        problem.message
+    );
 }
 
 #[test]

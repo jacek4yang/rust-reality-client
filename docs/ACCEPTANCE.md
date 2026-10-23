@@ -411,17 +411,17 @@ packet — is boxes 34 to 37, at the end of this list.
   ```
 
   ```text
-  unittests src\lib.rs      … 309 passed; 0 failed
+  unittests src\lib.rs      … 319 passed; 0 failed
   tests\cli.rs              … 17 passed; 0 failed
   tests\fault_injection.rs  … 8 passed; 0 failed
   tests\fuzz_smoke.rs       … 4 passed; 0 failed
   tests\serve.rs            … 8 passed; 0 failed
-  tests\interop_v201.rs     … 22 ignored (they need a live node; see box 5)
+  tests\interop_v201.rs     … 23 ignored (they need a live node; see box 5)
   doc-tests                 … 1 passed; 0 failed
   test result: ok.          … 0 failed
   ```
 
-  346 offline tests plus one doctest, and the 22 that cannot run offline run in box 5
+  356 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
   on two platforms.
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
@@ -684,6 +684,63 @@ everything, and what each socket is proved to hold.
   socket bytes rather than as memory. Box 26's footprint line is the same claim over
   1074 connections: descriptors 13 → 13, threads 2 → 2.
 
+## ClientHello fingerprints
+
+- [x] **38. The hello is built from pinned uTLS data, every supported shape
+  survives the REALITY invariants, and the live node accepts each one.**
+
+  `src/protocol/reality/fingerprint/data.rs` carries twelve concrete shapes
+  (Chrome 120/131/133, Firefox 120/148, Safari 26.3, iOS 13/14, Edge 85/106,
+  360 11.0, QQ 11.1) plus `random`, `randomized` and `randomizednoalpn`. The
+  source revision and the SHA-256 of every uTLS file are in
+  [`docs/FINGERPRINTS.md`](FINGERPRINTS.md); the constants are not generated at
+  build time and the binary has no Go or network dependency.
+
+  Offline evidence, all in `cargo test --locked`:
+
+  ```text
+  protocol::reality::fingerprint::tests::every_concrete_profile_is_reality_capable ... ok
+  protocol::reality::fingerprint::tests::every_profile_reports_a_bounded_record_and_a_32_byte_session_id ... ok
+  protocol::reality::fingerprint::tests::firefox_omits_the_p256_share_but_keeps_it_in_groups ... ok
+  protocol::reality::fingerprint::tests::chrome_shuffles_but_keeps_grease_positions_and_capabilities ... ok
+  protocol::reality::fingerprint::tests::boring_padding_lands_on_the_boringssl_target ... ok
+  protocol::reality::fingerprint::tests::grease_values_have_the_required_shape_and_are_distinct ... ok
+  protocol::reality::fingerprint::tests::randomized_is_stable_per_seed_and_always_reality_capable ... ok
+  protocol::reality::fingerprint::tests::names_map_to_the_intended_shapes_and_unusable_names_are_refused ... ok
+  ```
+
+  The per-profile auth round trip opens the 32-byte session ID against the
+  zeroed-AAD form, and `names_map...` proves that `android`, preset `360`,
+  `unsafe`, PSK/PQ and legacy names fail at configuration time instead of being
+  replaced by another shape. The Firefox shape is asserted to carry no P-256
+  **share** while retaining P-256 in `supported_groups`.
+
+  Live evidence is the same ignored test that runs the rest of the interop
+  gate:
+
+  ```sh
+  RRC_INTEROP_ADDR=… RRC_INTEROP_SERVER_NAME=… RRC_INTEROP_ALPN=… \
+    cargo test --locked --test interop_v201 -- --ignored every_supported_fingerprint_authenticates
+  ```
+
+  It walks all fifteen names in one process and requires a completed REALITY
+  handshake, an offered TLS 1.3 suite, an X25519/hybrid group, and an ALPN that
+  was actually in that hello. It asserts no latency: a non-Chrome class may take
+  the live-cover path.
+
+  On the fixture built from `v2.0.1`, the test passed 15/15 in 0.22 s. The full
+  live suite then passed 23/23 (21 in the first run; the two nested-TLS cases
+  first failed because the Windows `python3` shim was absent, and passed when
+  rerun with the real `python.exe`). The failure was the harness interpreter,
+  not the tunnel or the hello: the driver never connected, so the relay never
+  saw it.
+
+  What this does not establish: that a middlebox sees an ordinary browser. The
+  tests prove construction and REALITY acceptance, not full TLS record-layer or
+  timing behaviour. No real Xray hello capture is part of the automated gate;
+  the source revision is pinned, the structural tables are asserted, and the
+  live node is the interop authority.
+
 ---
 
 ## What this file does not establish
@@ -703,5 +760,8 @@ everything, and what each socket is proved to hold.
 * That the fault matrix covers more than the seven failure families the taxonomy has. It
   covers exactly those seven, both inbound edges, and a live node for four destination
   shapes.
+* That any fingerprint is indistinguishable from the browser it names. Box 38
+  proves source-derived construction and REALITY acceptance, not what a DPI or
+  middlebox observes after the first flight.
 * Anything about QUIC, HTTP/3, UDP, TUN, MUX or session migration. `v2.0.1` has no
   cross-node resume, so no box here claims one; see README §18.

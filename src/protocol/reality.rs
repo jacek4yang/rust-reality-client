@@ -7,12 +7,14 @@
 
 mod auth;
 mod certificate;
+pub(crate) mod fingerprint;
 mod handshake;
 mod hello;
 mod server_hello;
 
 pub use auth::{AuthError, AuthKey, AuthPlaintext, CLIENT_VERSION};
 pub use certificate::{CertificateError, parse_encrypted_extensions, verify_server_certificate};
+pub use fingerprint::{Fingerprint, UTLS_COMMIT};
 pub use handshake::{Handshake, Negotiated, complete};
 pub use hello::{ClientKeyAgreement, HelloError, HelloRecord, SharedSecret, build_client_hello};
 pub use server_hello::{ServerHello, ServerHelloError};
