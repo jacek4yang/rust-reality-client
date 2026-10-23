@@ -416,12 +416,13 @@ packet — is boxes 34 to 37, at the end of this list.
   tests\fault_injection.rs  … 8 passed; 0 failed
   tests\fuzz_smoke.rs       … 4 passed; 0 failed
   tests\serve.rs            … 8 passed; 0 failed
+  tests\clienthello_fixtures.rs … 1 passed; 0 failed
   tests\interop_v201.rs     … 23 ignored (they need a live node; see box 5)
   doc-tests                 … 1 passed; 0 failed
   test result: ok.          … 0 failed
   ```
 
-  356 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
+  357 offline tests plus one doctest, and the 23 that cannot run offline run in box 5
   on two platforms.
   `cargo +1.85.0 check --offline --all-targets` — the declared MSRV — also exits 0, on
   Windows and on Linux.
@@ -715,6 +716,16 @@ everything, and what each socket is proved to hold.
   replaced by another shape. The Firefox shape is asserted to carry no P-256
   **share** while retaining P-256 in `supported_groups`.
 
+  `tests/fixtures/clienthello/` holds normalized summaries of twelve real
+  `ClientHello` records captured from unmodified Xray-core v26.7.28 (`5ca6f4b`,
+  xray.exe SHA-256 `1d96743…`) through a loopback tee. The capture conditions
+  and normalization are recorded in that directory's README;
+  `cargo test --locked --test clienthello_fixtures` rebuilds each profile and
+  compares ciphers, extension order/multiset, groups, signature algorithms,
+  versions, ALPN, key-share groups/lengths and static bodies. It passes 12/12.
+  For Firefox the fixture retains Xray's P-256 share and the test asserts that
+  the only difference is the documented omission.
+
   Live evidence is the same ignored test that runs the rest of the interop
   gate:
 
@@ -736,10 +747,10 @@ everything, and what each socket is proved to hold.
   saw it.
 
   What this does not establish: that a middlebox sees an ordinary browser. The
-  tests prove construction and REALITY acceptance, not full TLS record-layer or
-  timing behaviour. No real Xray hello capture is part of the automated gate;
-  the source revision is pinned, the structural tables are asserted, and the
-  live node is the interop authority.
+  tests prove construction, shape equality with captured Xray records, and
+  REALITY acceptance — not full TLS record-layer or timing behaviour. The
+  capture comparison runs offline in the normal test suite; the live node
+  remains the interop authority.
 
 ---
 
@@ -761,7 +772,8 @@ everything, and what each socket is proved to hold.
   covers exactly those seven, both inbound edges, and a live node for four destination
   shapes.
 * That any fingerprint is indistinguishable from the browser it names. Box 38
-  proves source-derived construction and REALITY acceptance, not what a DPI or
-  middlebox observes after the first flight.
+  proves source-derived construction, equality with captured Xray shapes and
+  REALITY acceptance, not what a DPI or middlebox observes after the first
+  flight.
 * Anything about QUIC, HTTP/3, UDP, TUN, MUX or session migration. `v2.0.1` has no
   cross-node resume, so no box here claims one; see README §18.

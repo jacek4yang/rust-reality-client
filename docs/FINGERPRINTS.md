@@ -119,6 +119,21 @@ authenticator round trip, Chrome's shuffle and GREASE positions, BoringSSL
 padding, the Firefox P-256 omission, randomized stability over 1,000 seeds, and
 the refusal diagnostics.
 
+The independent shape check is:
+
+```sh
+cargo test --locked --test clienthello_fixtures
+```
+
+`tests/fixtures/clienthello/` holds normalized summaries of real `ClientHello`
+records captured from unmodified Xray-core v26.7.28 (`5ca6f4b`) behind a
+loopback tee. `tests/clienthello_fixtures.rs` rebuilds each profile and compares
+cipher list, extension order/multiset, groups, signature algorithms, versions,
+ALPN, key-share groups/lengths and the static extension bodies. All twelve
+concrete captures pass; the Firefox fixtures keep the P-256 share that this
+client omits, and the test asserts that this is the only difference. The fixture
+directory's README records the Xray binary hash and the capture conditions.
+
 Live node (credentials remain in `target/interop/handoff.env`):
 
 ```sh

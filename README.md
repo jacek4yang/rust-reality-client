@@ -70,7 +70,7 @@ the interop gate runs.
 | REALITY key groups | `X25519` (`0x001d`) and `X25519MLKEM768` (`0x11ec`) |
 | Authentication | AES-256-GCM / ChaCha20-Poly1305 record AEAD, `REALITY` HKDF label, 16-byte plaintext, 20-byte nonce offset — as `v2.0.1` reads them |
 | ALPN | offered with the profile's list, and tolerated when absent |
-| ClientHello fingerprint | 12 modern browser shapes plus `random`, `randomized` and `randomizednoalpn`, selected per node; source-pinned to uTLS `aa6edf4…` and documented in [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md) |
+| ClientHello fingerprint | 12 modern browser shapes plus `random`, `randomized` and `randomizednoalpn`, selected per node; source-pinned to uTLS `aa6edf4…` and checked against real Xray 26.7.28 captures, as documented in [`docs/FINGERPRINTS.md`](docs/FINGERPRINTS.md) |
 | Vision | `Continue` / `End` / `Direct` decision, 8 KiB frames, the padding distributions the server produces |
 | Timestamp tolerance | the node's own `maxTimeDiffMs` default (60 000 ms) |
 | UDP, MUX, other flows | **not** implemented, because `v2.0.1` does not accept them |
