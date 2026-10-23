@@ -107,7 +107,7 @@ database, no web UI. The layers and their job:
 
 The relay moves a 130,992-byte uplink chunk (sixteen 8 KiB Vision frames) and a
 65,536-byte downlink chunk, then reuses those buffers; the full 256-connection
-ceiling measured 17.7 MiB resident. Loopback fixtures recorded 1056/902 MiB/s on
+ceiling measured 17.6 MiB resident. Loopback fixtures recorded 1056/902 MiB/s on
 one raw stream, 2219/2138 MiB/s on eight, and 0.27 ms application RTT; the exact
 fixtures, hashes and caveats are in
 [`docs/experiments/README.md`](docs/experiments/README.md). These are shared-host

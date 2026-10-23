@@ -152,12 +152,14 @@ def ping_pong(proxy_port, host, port, count):
 
 def setup(proxy_port, host, port, count):
     samples = []
+    # v2.0.1 buffers the first destination bytes until it has five.
+    probe = b'hello'
     for _ in range(count):
         begin = time.monotonic()
         sock = socks_connect(proxy_port, host, port)
         try:
-            sock.sendall(b'x')
-            assert recv_exact(sock, 1) == b'x'
+            sock.sendall(probe)
+            assert recv_exact(sock, len(probe)) == probe
         finally:
             sock.close()
         samples.append(time.monotonic() - begin)

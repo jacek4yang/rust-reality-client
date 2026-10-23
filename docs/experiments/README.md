@@ -410,13 +410,19 @@ rounds. Upload is therefore slightly ahead at eight streams, download is 5.3x,
 and the client holds about one fifth of the RSS.
 
 `scripts/interop/bulk_stability.py` is the CI gate (two rounds of eight 64 MiB
-streams, every byte digest-checked). On the local WSL host it moved 358–385
-MiB/s aggregate, then measured 1000 ping-pongs at P50/P95/P99
-0.273/0.324/0.407 ms and 50 fresh connections at P50/P95 4.47/5.01 ms. RSS moved
-from 4.8 to 7.2 MiB (peak 7.5 MiB), descriptors from 11 to 10 (peak 26 while
+streams, every byte digest-checked). Against the pinned v2.0.1 node it moved
+377–416 MiB/s aggregate, then measured 1000 ping-pongs at P50/P95/P99
+0.270/0.339/0.421 ms and 50 fresh connections at P50/P95 3.84/4.16 ms. RSS moved
+from 4.85 to 8.36 MiB (peak 8.75 MiB), descriptors from 11 to 11 (peak 26 while
 eight streams were open). The harness fails on a digest mismatch, P99 above
 250 ms, setup P95 above 5 s, or descriptor/RSS growth beyond its documented
 slack.
+
+The first run of that gate used a one-byte setup probe and looked like a
+15-second client timeout. The node log showed `uplink_bytes=1, downlink_bytes=1`
+and a 15-second connection: pinned v2.0.1 buffers the first destination bytes
+until it has five (or sees EOF) before classifying the stream. The probe, not
+the client, was the artifact; setup and idle probes now send five bytes.
 
 The remaining stability ceiling is the traffic-key record budget: AES-GCM keys
 retire after `2^24` records, which at 8 KiB Vision frames is about 128 GiB of
@@ -455,22 +461,24 @@ reset rather than a local key-exhausted error. The process stayed alive, RSS
 moved from 4.9 to 5.3 MiB, and descriptors returned from 11 to 10. Neither
 direction retried or migrated.
 
-A separate 600.22 s application soak ran on the final committed build
-(`70f4d4d`, binary `53df6390…`) against the pinned v2.0.1 server with two
-isolated Handoff processes: four WSS streams (TLS 1.2 and 1.3, each through HTTP
-and SOCKS) carried 200 checked messages each and closed with code 1000; four SSE
-streams delivered 2994 sequential events each; 1161 short WSS connections
-churned; and 20 origin resets, 20 local cancellations and 40 explicit
-reconnections were injected. After drain the client had RSS 8.2 MiB, 11
-descriptors, 4.13 CPU seconds, `failed=0`, `panicked=0`, and every permit
-returned. Application round-trip percentiles were P50/P95/P99
-1.39/2.93/3.80 ms. Both `direct` and `outer` downlinks were observed. The
-report is `target/application-soak-final-10m/report.json` (ignored).
+Two application soaks ran against the pinned v2.0.1 server with two isolated
+Handoff processes. The ten-minute run (`70f4d4d`, binary `53df6390…`) carried
+four WSS streams (200 checked messages each, close code 1000), four SSE streams
+(2994 events each), 1161 churn connections, 20 resets, 20 cancellations and 40
+reconnections; after drain RSS was 8.2 MiB, descriptors 11, CPU 4.13 s,
+`failed=0`, `panicked=0`, and application round-trips were P50/P95/P99
+1.39/2.93/3.80 ms. The thirty-minute run (`ad63069`, binary `43080e0…`) carried
+four WSS streams (300 messages each), four SSE streams (8980 events each), 3483
+churn connections, 60 resets, 60 cancellations and 120 reconnections; after
+drain RSS was 8.66 MiB, descriptors 11, CPU 11.89 s, and round-trips were
+1.38/2.57/3.73 ms. Both observed `direct` and `outer` downlinks; reports are
+`target/application-soak-final-10m/report.json` and
+`target/application-soak-30m/report.json` (ignored).
 
-`idle_capacity.py` opened the full 256 local-connection ceiling, one echo byte
-each. All 256 established; loaded RSS was 17.7 MiB (about 50.5 KiB per idle
+`idle_capacity.py` opened the full 256 local-connection ceiling, a five-byte
+echo each. All 256 established; loaded RSS was 17.6 MiB (about 49.8 KiB per idle
 connection) with 522 descriptors. After closing them the client held 10
-descriptors and 16.6 MiB. The nominal relay reservation at the ceiling is about
+descriptors and 16.3 MiB. The nominal relay reservation at the ceiling is about
 48 MiB; untouched pages keep measured RSS lower until a connection carries
 bulk data. This is a capacity check, not a throughput result.
 

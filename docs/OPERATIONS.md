@@ -484,8 +484,8 @@ injects one of its own to make a dead session look alive.
   occupies a worker for a chunk rather than for a session, and there is no second
   runtime, queue or thread pool in front of it.
 * At the 256-connection ceiling, all connections established with a measured
-  loaded RSS of 17.7 MiB (about 50.5 KiB per idle connection) and 522
-  descriptors; after close, 10 descriptors remained and RSS was 16.6 MiB. The
+  loaded RSS of 17.6 MiB (about 49.8 KiB per idle connection) and 522
+  descriptors; after close, 10 descriptors remained and RSS was 16.3 MiB. The
   reserved relay total at that ceiling is 48 MiB; untouched pages are not
   resident until a connection carries bulk data.
 

@@ -726,9 +726,9 @@ everything, and what each socket is proved to hold.
   runtime and no queue between the two sockets, so backpressure arrives as unread
   socket bytes rather than as memory. Box 26's footprint line is the same claim over
   1074 connections: descriptors 13 → 13, threads 2 → 2. At the full
-  256-connection ceiling, measured loaded RSS was 17.7 MiB (about 50.5 KiB per
+  256-connection ceiling, measured loaded RSS was 17.6 MiB (about 49.8 KiB per
   idle connection) with 522 descriptors; after close, 10 descriptors remained
-  and RSS was 16.6 MiB.
+  and RSS was 16.3 MiB.
 
 ## ClientHello fingerprints
 
@@ -842,17 +842,19 @@ everything, and what each socket is proved to hold.
   send KeyUpdate; the record budget is a protocol limit, documented in
   Operations.
 
-- [x] **41. The final build survives a ten-minute mixed WSS/SSE soak.**
+- [x] **41. The final build survives ten- and thirty-minute mixed WSS/SSE soaks.**
 
-  Against the pinned v2.0.1 server with two isolated Handoff processes, the
-  final build ran 600.22 seconds: four WSS streams (TLS 1.2 and 1.3 through
-  HTTP and SOCKS) carried 200 checked messages each with close code 1000, four
-  SSE streams delivered 2994 sequential events each, 1161 short WSS connections
-  churned, and 20 origin resets, 20 local cancellations and 40 explicit
-  reconnections were injected. After drain: `failed=0`, `panicked=0`, RSS
-  8.2 MiB, 11 descriptors, all permits returned, and application round-trip
-  P50/P95/P99 of 1.39/2.93/3.80 ms. Both `direct` and `outer` downlinks were
-  observed. This is loopback fixture evidence, not a WAN or provider test.
+  Against the pinned v2.0.1 server with two isolated Handoff processes, a
+  600.22-second run carried four WSS streams (200 messages each, close code
+  1000), four SSE streams (2994 events each), 1161 churn connections, 20 resets,
+  20 cancellations and 40 reconnections; after drain `failed=0`, `panicked=0`,
+  RSS 8.2 MiB, 11 descriptors and P50/P95/P99 1.39/2.93/3.80 ms. A second
+  1800.43-second run carried four WSS streams (300 messages each), four SSE
+  streams (8980 events each), 3483 churn connections, 60 resets, 60
+  cancellations and 120 reconnections; after drain `failed=0`, `panicked=0`, RSS
+  8.66 MiB, 11 descriptors, all permits returned, and P50/P95/P99
+  1.38/2.57/3.73 ms. Both runs observed `direct` and `outer` downlinks. This is
+  loopback fixture evidence, not a WAN or provider test.
 
 ---
 

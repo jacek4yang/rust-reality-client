@@ -120,17 +120,19 @@ def main():
         [str(args.client.resolve()), 'run', '--config', str(config), '--log-level', 'warn'],
         stdout=log, stderr=subprocess.STDOUT)
     report = {'passed': False, 'requested_connections': args.connections,
-              'limitations': ['loopback', 'one-byte echo per connection']}
+              'limitations': ['loopback', 'five-byte echo per connection']}
     sockets = []
     try:
         wait_port(port)
         before = stats(client.pid)
         peak = before
         opened = 0
+        probe = b'hello'
         for _ in range(args.connections):
             sock = socks_connect(port, echo_host, echo_port)
-            sock.sendall(b'x')
-            assert recv_exact(sock, 1) == b'x'
+            # v2.0.1 buffers the first destination bytes until it has five.
+            sock.sendall(probe)
+            assert recv_exact(sock, len(probe)) == probe
             sockets.append(sock)
             opened += 1
             value = stats(client.pid)
@@ -138,9 +140,10 @@ def main():
                 peak = value
         loaded = stats(client.pid)
         # Every connection must still answer after the ceiling was reached.
+        later = b'world'
         for sock in sockets[::32]:
-            sock.sendall(b'y')
-            assert recv_exact(sock, 1) == b'y'
+            sock.sendall(later)
+            assert recv_exact(sock, len(later)) == later
         for sock in sockets:
             sock.close()
         sockets.clear()
