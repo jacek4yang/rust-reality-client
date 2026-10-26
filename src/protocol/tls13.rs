@@ -1321,7 +1321,11 @@ mod tests {
             Err(RecordError::InvalidLength)
         );
         assert_eq!(output, [0x5a, 0x5a, 0x5a]);
-        assert_eq!(records.records_used(), 0, "a refused record consumes no sequence");
+        assert_eq!(
+            records.records_used(),
+            0,
+            "a refused record consumes no sequence"
+        );
     }
 
     #[test]

@@ -308,8 +308,8 @@ where
             // Bound the write to its own statement: taking the socket's result
             // inside `match` would keep `outgoing` borrowed across the arms,
             // which are the only places that shorten it.
-            let written = Pin::new(&mut self.stream)
-                .poll_write(context, &self.outgoing[self.outgoing_at..]);
+            let written =
+                Pin::new(&mut self.stream).poll_write(context, &self.outgoing[self.outgoing_at..]);
             match written {
                 // A zero-length write on an established socket is the way tokio
                 // reports that the peer is gone.
@@ -414,8 +414,10 @@ where
     ///
     /// Reports the defect in bytes that can never begin an encrypted record.
     fn pending_record_len(&self) -> Result<usize, RecordError> {
-        Ok(RecordLayer::record_len(&self.incoming[..self.incoming_len])
-            ?.unwrap_or(RECORD_HEADER_LEN))
+        Ok(
+            RecordLayer::record_len(&self.incoming[..self.incoming_len])?
+                .unwrap_or(RECORD_HEADER_LEN),
+        )
     }
 
     /// Extends `incoming` toward `wanted`, the length of the record being built.
@@ -602,9 +604,7 @@ where
                 this.readable_at = 0;
                 if this.downlink == Downlink::Direct {
                     return match this.poll_raw(context, buffer) {
-                        Poll::Pending if buffer.filled().len() > started => {
-                            Poll::Ready(Ok(()))
-                        }
+                        Poll::Pending if buffer.filled().len() > started => Poll::Ready(Ok(())),
                         outcome => outcome,
                     };
                 }
@@ -695,9 +695,9 @@ where
                     .assemble(&plan, &buf[accepted..accepted + taken], body);
             }
             this.encoder.commit(&plan);
-            if let Err(error) = this
-                .outbound
-                .finish_record(start, ContentType::ApplicationData, &mut this.outgoing)
+            if let Err(error) =
+                this.outbound
+                    .finish_record(start, ContentType::ApplicationData, &mut this.outgoing)
             {
                 return Poll::Ready(Err(into_io_error(&this.fail(record_failure(error)))));
             }
@@ -1690,7 +1690,10 @@ mod tests {
             .await
             .expect("corrupt header");
         let mut buffer = [0_u8; 64];
-        let read = session.read(&mut buffer).await.expect("payload is delivered");
+        let read = session
+            .read(&mut buffer)
+            .await
+            .expect("payload is delivered");
         assert_eq!(&buffer[..read], b"first");
         let error = session
             .read(&mut buffer)

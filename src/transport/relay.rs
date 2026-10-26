@@ -61,7 +61,8 @@ pub const UPLINK_BATCH_FRAMES: usize = 16;
 /// become an extra, nearly empty record on every chunk: about a quarter of the
 /// traffic key's record budget wasted on a fast stream. Full frames fit the
 /// chunk with no remainder, so every record carries its full capacity.
-pub const RELAY_BUFFER: usize = UPLINK_BATCH_FRAMES * crate::protocol::vision::FRAME_CONTENT_CAPACITY;
+pub const RELAY_BUFFER: usize =
+    UPLINK_BATCH_FRAMES * crate::protocol::vision::FRAME_CONTENT_CAPACITY;
 
 /// Bytes one downlink read hands to the local socket.
 ///
