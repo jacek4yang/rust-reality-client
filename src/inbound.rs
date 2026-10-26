@@ -33,9 +33,10 @@ pub mod socks5;
 /// The most local connections this edge serves at once.
 ///
 /// Each one costs a task and two relay buffers — [`RELAY_BUFFER`](crate::transport::RELAY_BUFFER)
-/// in each direction, so 16 KiB — which puts the whole ceiling at a few megabytes
-/// of memory. It is a ceiling and not a target: the point is that a local process
-/// cannot make this client's memory grow by opening sockets.
+/// uplink and [`DOWNLINK_BUFFER`](crate::transport::DOWNLINK_BUFFER) downlink, so
+/// about 190 KiB — which puts the whole ceiling at 48 MiB of relay memory. It is
+/// a ceiling and not a target: the point is that a local process cannot make
+/// this client's memory grow by opening sockets.
 pub const MAX_LOCAL_CONNECTIONS: usize = 256;
 
 /// The most connections that may be authenticating at once.

@@ -20,6 +20,9 @@ use crate::entropy::BlockRng;
 /// Maximum wire size of one Vision frame, header and padding included.
 pub const FRAME_SIZE: usize = 8 * 1024;
 
+/// Largest content one frame can carry when no user id prefixes it.
+pub const FRAME_CONTENT_CAPACITY: usize = FRAME_SIZE - HEADER_SIZE;
+
 const UUID_SIZE: usize = 16;
 const HEADER_SIZE: usize = 5;
 const LONG_PADDING_THRESHOLD: usize = 900;
@@ -305,7 +308,7 @@ impl Encoder {
     #[must_use]
     pub const fn max_content(&self) -> usize {
         let uuid_len = if self.first_frame { UUID_SIZE } else { 0 };
-        FRAME_SIZE - HEADER_SIZE - uuid_len
+        FRAME_CONTENT_CAPACITY - uuid_len
     }
 
     /// Whether this encoder has emitted its terminating command.

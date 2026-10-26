@@ -149,6 +149,55 @@ jobs:
           export RRC_SOAK_SECONDS=30
           cargo test --locked --test interop_v201 -- --ignored --test-threads=1
 
+      - name: Bulk transfers, latency and resource stability
+        run: |
+          set -euo pipefail
+          # The interop step's trap has already stopped its fixture, so this
+          # step owns a fresh one for the bulk and capacity checks.
+          INTEROP_BINARY="$RUNNER_TEMP/v201/target/release/rust-reality" \
+            bash scripts/interop/upstream-server.sh > "$RUNNER_TEMP/stability-node.log" 2>&1 &
+          node=$!
+          trap 'kill "$node" 2>/dev/null || true' EXIT INT TERM
+          for _ in $(seq 1 120); do
+            if [[ -s target/interop/handoff.env ]]; then break; fi
+            sleep 0.5
+          done
+          if [[ ! -s target/interop/handoff.env ]]; then
+            echo "stability fixture never published its handoff" >&2
+            cat "$RUNNER_TEMP/stability-node.log" >&2
+            exit 1
+          fi
+          set -a
+          . target/interop/handoff.env
+          set +a
+          # Client and node share this runner, so loopback is the honest address.
+          export RRC_INTEROP_ADDR="$RRC_INTEROP_LOOPBACK"
+          cargo build --release --locked
+          mkdir -p target/bulk-stability target/idle-capacity
+          # Eight concurrent streams, digest-checked in both directions, then
+          # ping-pong and fresh-connection latency. The harness rejects descriptor
+          # or RSS growth and a latency outlier, so this is a gate, not a report.
+          python3 scripts/interop/bulk_stability.py \
+            --client target/release/rust-reality-client \
+            --mib 64 --streams 8 --rounds 2 --pings 1000 --setups 50 \
+            --output target/bulk-stability/report.json
+          python3 scripts/interop/idle_capacity.py \
+            --client target/release/rust-reality-client \
+            --connections 256 --output target/idle-capacity/report.json
+      - name: Stability report
+        if: always()
+        run: |
+          cat target/bulk-stability/report.json || true
+          cat target/idle-capacity/report.json || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: stability-evidence
+          path: |
+            target/bulk-stability/report.json
+            target/idle-capacity/report.json
+          if-no-files-found: warn
+
       - name: Exercise JSON through the actual CLI and TLS applications
         run: |
           cargo build --release --locked
@@ -298,6 +347,38 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Offline regressions (live pinned-server tests run on Linux)
         run: cargo test --locked
+      - name: Release build and CLI smoke
+        run: |
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+          target/release/rust-reality-client.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "version failed" }
+          target/release/rust-reality-client.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "help failed" }
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.MSRV }}
+          components: ""
+      - name: MSRV
+        run: cargo check --locked --all-targets
+
+  macos:
+    name: macOS portable core regression
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/toolchain
+        with:
+          version: ${{ env.RUST }}
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline regressions (live pinned-server tests run on Linux)
+        run: cargo test --locked
+      - name: Release build and CLI smoke
+        run: |
+          cargo build --release --locked
+          target/release/rust-reality-client --version
+          target/release/rust-reality-client --help > /dev/null
       - uses: ./.github/actions/toolchain
         with:
           version: ${{ env.MSRV }}

@@ -698,7 +698,7 @@ everything, and what each socket is proved to hold.
   The mechanism split the section exists to make explicit: **A** bounded setup
   (`DNS_BUDGET` 5 s, `CONNECT_BUDGET` 10 s, `FIRST_BYTE_BUDGET` 15 s), **B** kernel
   liveness (30/10/3 plus the system's retransmission budget), **C** pending writes
-  (no timer here, and a fixed 8 KiB buffer per direction that cannot grow — a stalled
+  (no timer here, and fixed relay buffers that cannot grow — a stalled
   writer stops pulling instead of queueing), **D** application deadlines and
   heartbeats, which this proxy neither imposes nor impersonates: a WebSocket Ping,
   Pong or Close is payload, carried byte for byte and never synthesised here. A
@@ -707,11 +707,13 @@ everything, and what each socket is proved to hold.
 
 - [x] **37. The hot path's cost is fixed and greppable.**
 
-  `RELAY_BUFFER` is 8 KiB per direction (`src/transport/relay.rs:57`), and the copy is
-  tokio's `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
+  `RELAY_BUFFER` is 130,992 bytes uplink and `DOWNLINK_BUFFER` 65,536
+  (`src/transport/relay.rs:64-71`), and the copy is tokio's
+  `copy_bidirectional_with_sizes`, which allocates exactly two buffers per
   connection and reuses them for every chunk. A Vision session holds four buffers,
-  each reserved at construction (`src/transport/session.rs:253-257`); the three
-  `resize` calls in that file grow within the reservation. The codec's production
+  each allocated once at construction (`src/transport/session.rs:260-269`),
+  including one full sixteen-record uplink batch for `outgoing`; later
+  `resize`/fill calls reuse those reservations or the fixed incoming buffer. The codec's production
   region allocates nothing — no `Vec::new`, `to_vec`, `format!` or `clone` anywhere
   above the test module at `src/protocol/vision.rs:579` — and nothing in
   `relay.rs`, `session.rs` or `vision.rs` logs:
@@ -723,7 +725,10 @@ everything, and what each socket is proved to hold.
   returns nothing. There is one task per connection on the shared runtime, no second
   runtime and no queue between the two sockets, so backpressure arrives as unread
   socket bytes rather than as memory. Box 26's footprint line is the same claim over
-  1074 connections: descriptors 13 → 13, threads 2 → 2.
+  1074 connections: descriptors 13 → 13, threads 2 → 2. At the full
+  256-connection ceiling, measured loaded RSS was 17.6 MiB (about 49.8 KiB per
+  idle connection) with 522 descriptors; after close, 10 descriptors remained
+  and RSS was 16.3 MiB.
 
 ## ClientHello fingerprints
 
@@ -819,6 +824,37 @@ everything, and what each socket is proved to hold.
   a REALITY handshake, and the earlier factory failure did not recur. This is a
   source fix; the already-published v0.1.1 artifact predates it and must be
   rebuilt from a commit that contains this box.
+
+- [x] **40. Bulk records use their full capacity and the key budget ends cleanly.**
+
+  `RELAY_BUFFER` is exactly sixteen Vision frame contents (130,992 bytes), so a
+  relay chunk no longer spills a few trailing bytes into an extra, nearly empty
+  record. A single upload session reached 137,357,164,544 bytes (127.9 GiB) in
+  127 s (1029 MiB/s) before reporting `session traffic key exhausted`; the
+  client stayed alive, descriptors returned from 11 to 10, and no byte was
+  retried. Before the alignment the same test stopped at 109,978,845,184 bytes
+  (102.4 GiB). A
+  downlink test reached 274,874,148,645 bytes (256.0 GiB) before the node reset
+  the connection at its own `2^24` record limit; the client logged the reset,
+  stayed alive, and returned its descriptors. The pinned v2.0.1 server rejects
+  post-handshake `Handshake` records
+  (`src/protocol/reality/tls13/application_io.rs:541`), so the client does not
+  send KeyUpdate; the record budget is a protocol limit, documented in
+  Operations.
+
+- [x] **41. The final build survives ten- and thirty-minute mixed WSS/SSE soaks.**
+
+  Against the pinned v2.0.1 server with two isolated Handoff processes, a
+  600.22-second run carried four WSS streams (200 messages each, close code
+  1000), four SSE streams (2994 events each), 1161 churn connections, 20 resets,
+  20 cancellations and 40 reconnections; after drain `failed=0`, `panicked=0`,
+  RSS 8.2 MiB, 11 descriptors and P50/P95/P99 1.39/2.93/3.80 ms. A second
+  1800.43-second run carried four WSS streams (300 messages each), four SSE
+  streams (8980 events each), 3483 churn connections, 60 resets, 60
+  cancellations and 120 reconnections; after drain `failed=0`, `panicked=0`, RSS
+  8.66 MiB, 11 descriptors, all permits returned, and P50/P95/P99
+  1.38/2.57/3.73 ms. Both runs observed `direct` and `outer` downlinks. This is
+  loopback fixture evidence, not a WAN or provider test.
 
 ---
 

@@ -317,3 +317,216 @@ Runtime remains c1fdd8e; the musl package is the verified executable from CI
 The real 24-hour run began 2026-10-04 05:57 UTC. Its incremental progress is not a
 pass. A completed report and unchanged-runtime manifest are mandatory before
 publication. This section will be updated once that run terminates.
+
+## Raw TCP client/tunnel throughput, 2026-10-23/24
+
+`scripts/experiments/raw_throughput.py` compares this client and official Xray
+26.10.21 as SOCKS5 clients against the same unmodified rust-reality `main`
+server, commit `6b87633` (binary SHA-256
+`c702961fb21d590232493c9f46f8407014b2269eb386b674e2bead09d610bf11`). Both use
+REALITY + Vision and the `chrome` fingerprint. Each series is five rounds of
+256 MiB per direction, alternating order, on a 16-vCPU WSL2 loopback with kernel
+6.18.33.1-microsoft-standard-WSL2. The sink and source are local Python servers
+and the traffic is raw TCP with no TLS origin.
+
+The first series measured the pre-tuning client at HEAD `ba4d401` (binary
+SHA-256 `495f2d6656bf032e41a262181f3a197b5382ff7a6a943db508e5ce7e6cc16e7f`).
+It showed the upload gap that motivated the tuning:
+
+| Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | CPU s per 256 MiB up/down | Sampled RSS KiB |
+|---|---:|---:|---:|---:|
+| Pre-tuning | 392.1 (375.1–405.0) | 625.7 (571.9–701.4) | 0.64 / 0.40 | 5432 |
+| Xray 26.10.21 | 599.6 (584.8–683.1) | 303.3 (295.0–312.6) | 0.44 / 0.36 | 32028 |
+
+The tuning raises the relay buffer from 8 KiB to 32 KiB and seals up to four
+8 KiB Vision frames into one socket write (`src/transport/relay.rs`,
+`VisionSession::poll_write`). The outgoing batch remains the backpressure bound:
+a stalled socket makes the next write wait, so buffering does not grow with the
+transfer; its capacity is reserved with the session. Two independent five-round
+series of the tuned build (SHA-256
+`2a6fe9f1fdaeab962358a72fc88dfd4b2b9be17ea35824006f08589ea14f6652`):
+
+| Series | Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | CPU s per 256 MiB up/down | Sampled RSS KiB |
+|---|---|---:|---:|---:|---:|
+| A | Tuned | 759.6 (713.0–803.2) | 860.3 (778.8–897.6) | 0.32 / 0.30 | 5532 |
+| A | Xray 26.10.21 | 640.7 (617.4–673.8) | 301.2 (296.2–307.1) | 0.41 / 0.36 | 32212 |
+| B | Tuned | 709.0 (659.5–756.6) | 813.9 (727.1–849.7) | 0.34 / 0.31 | 5480 |
+| B | Xray 26.10.21 | 587.5 (561.4–591.1) | 303.6 (296.1–306.7) | 0.45 / 0.36 | 31812 |
+
+Three later five-round series of the final build (SHA-256
+`988abfa5e469a0640722a1093b64b180e4631b5a4fd3e48884face8c313a26c1`), which
+also reserves the batch capacity at construction, ran while the shared host was
+busier: Xray's own rates fell, so this is a host-load shift rather than a client
+regression. Median upload/download pairs were 581.3/389.2, 627.0/433.4 and
+609.3/472.1 MiB/s for the tuned client, against 532.1/265.1, 523.7/260.7 and
+533.1/262.2 MiB/s for Xray. The ordering held in every series: upload
+1.09–1.21x Xray and download 1.46–2.86x across all five.
+
+The absolute rates move with host load; only the relative ordering repeated.
+In the lighter series the tuned client also spent less CPU per 256 MiB in both
+directions. On the busier host its upload CPU stayed lower, while its download
+CPU was somewhat higher per byte even as it moved 1.5–1.8x the bytes. Each
+connection now reserves 64 KiB of relay buffers instead of 16 KiB, plus one
+bounded uplink batch. Two alternating clients on one loopback host, Python
+endpoints and no TLS origin mean these numbers do not establish WAN,
+application-level, or production superiority. They are not comparable with the
+user's separate Xray-to-Xray 854 MiB/s application result, which used different
+endpoints and a TLS-bearing workload.
+
+## TLS origins, concurrency and stability, 2026-10-24
+
+The final client (binary SHA-256
+`53df639002c278d99b7b8161314216f52f0e6825da8c9b7e0b809b6dcc77cf71`) was
+measured against the same rust-reality `main` node and official Xray 26.10.21.
+`bulk_profile.py` (64 MiB per transfer) runs through the fixture's real TLS 1.3
+and TLS 1.2 origins over one connection; values are medians of two rounds in
+MiB/s:
+
+| Origin | Client | Upload | Download |
+|---|---|---:|---:|
+| TLS 1.3 | Optimized | 584 | 532 |
+| TLS 1.3 | Xray 26.10.21 | 236 | 513 |
+| TLS 1.2 | Optimized | 727 | 588 |
+| TLS 1.2 | Xray 26.10.21 | 614 | 571 |
+| TLS 1.3 | Direct fixture control | 730 | 759 |
+| TLS 1.2 | Direct fixture control | 718 | 800 |
+
+The direct control bypasses the proxy, so it measures the Python TLS/hashing
+fixture and is neither an upper bound nor a proxy result. The four-connection
+rows are omitted on purpose: the direct arm also fell to 168–203 MiB/s, which
+means the Python fixture, not either client, bounded that run.
+
+Eight concurrent 32 MiB streams through the same server (`raw_throughput.py
+--concurrency 8`, three rounds, final batch):
+
+| Client | Aggregate upload MiB/s | Aggregate download MiB/s | Sampled RSS KiB |
+|---|---:|---:|---:|
+| Optimized | 2219 | 2138 | 8100 |
+| Xray 26.10.21 | 1880 | 403 | 36200 |
+
+Another Xray upload round contained a 29 MiB/s straggler; this three-round set
+aggregated 1862–2027 MiB/s. Xray's download aggregate was 391–408 MiB/s in all
+rounds. Upload is therefore slightly ahead at eight streams, download is 5.3x,
+and the client holds about one fifth of the RSS.
+
+`scripts/interop/bulk_stability.py` is the CI gate (two rounds of eight 64 MiB
+streams, every byte digest-checked). Against the pinned v2.0.1 node it moved
+377–416 MiB/s aggregate, then measured 1000 ping-pongs at P50/P95/P99
+0.270/0.339/0.421 ms and 50 fresh connections at P50/P95 3.84/4.16 ms. RSS moved
+from 4.85 to 8.36 MiB (peak 8.75 MiB), descriptors from 11 to 11 (peak 26 while
+eight streams were open). The harness fails on a digest mismatch, P99 above
+250 ms, setup P95 above 5 s, or descriptor/RSS growth beyond its documented
+slack.
+
+The first run of that gate used a one-byte setup probe and looked like a
+15-second client timeout. The node log showed `uplink_bytes=1, downlink_bytes=1`
+and a 15-second connection: pinned v2.0.1 buffers the first destination bytes
+until it has five (or sees EOF) before classifying the stream. The probe, not
+the client, was the artifact; setup and idle probes now send five bytes.
+
+The remaining stability ceiling is the traffic-key record budget: AES-GCM keys
+retire after `2^24` records, which at 8 KiB Vision frames is about 128 GiB of
+uplink (or 256 GiB of 16 KiB downlink) in one session. The session reports
+`session traffic key exhausted` and does not migrate or replay; see
+[Operations: traffic-key record budget](../OPERATIONS.md#traffic-key-record-budget).
+Typical AI request/response traffic is far below this, and client-initiated
+TLS KeyUpdate is not implemented.
+
+These measurements remain shared-host loopback evidence with Python endpoints.
+They do not establish WAN, application-level, or production superiority; the CI
+matrix adds Linux, Windows and macOS correctness coverage, not WAN capacity.
+
+## Aligned relay chunks, record budget and latency, 2026-10-24
+
+A 32 KiB relay buffer is 20 bytes larger than four full Vision frame contents.
+Those 20 bytes became a fifth, almost empty record on every chunk. Aligning
+`RELAY_BUFFER` to 4 × 8187 = 32,748 bytes removed that record; the downlink
+buffer is 32,768 bytes, exactly two 16 KiB records, so a local write no longer
+ends with a 20-byte fragment every second record.
+
+The record budget is the clearest evidence. Before alignment one upload session
+stopped at 109,978,845,184 bytes (102.4 GiB) with `session traffic key
+exhausted`. After alignment, and with the final sixteen-frame batch, the same
+test reached 137,357,164,544 bytes (127.9 GiB) in 127.2 s (1029 MiB/s), then
+reported the same explicit error. The client process stayed alive, RSS moved
+from 4.8 to 5.4 MiB, and descriptors returned from 11 to 10; no byte was
+retried. This is the full `2^24`-record budget for 8 KiB frames.
+`scripts/experiments/record_limit.py` reproduces the trial; it is opt-in because
+it moves about 128 GiB over loopback.
+
+The downlink side reached 274,874,148,645 bytes (256.0 GiB) in 494.0 s
+(530.6 MiB/s) before the node reset the connection. The node seals downlink
+records and meets its own `2^24` limit first, so the client logs a transport
+reset rather than a local key-exhausted error. The process stayed alive, RSS
+moved from 4.9 to 5.3 MiB, and descriptors returned from 11 to 10. Neither
+direction retried or migrated.
+
+Two application soaks ran against the pinned v2.0.1 server with two isolated
+Handoff processes. The ten-minute run (`70f4d4d`, binary `53df6390…`) carried
+four WSS streams (200 checked messages each, close code 1000), four SSE streams
+(2994 events each), 1161 churn connections, 20 resets, 20 cancellations and 40
+reconnections; after drain RSS was 8.2 MiB, descriptors 11, CPU 4.13 s,
+`failed=0`, `panicked=0`, and application round-trips were P50/P95/P99
+1.39/2.93/3.80 ms. The thirty-minute run (`ad63069`, binary `43080e0…`) carried
+four WSS streams (300 messages each), four SSE streams (8980 events each), 3483
+churn connections, 60 resets, 60 cancellations and 120 reconnections; after
+drain RSS was 8.66 MiB, descriptors 11, CPU 11.89 s, and round-trips were
+1.38/2.57/3.73 ms. Both observed `direct` and `outer` downlinks; reports are
+`target/application-soak-final-10m/report.json` and
+`target/application-soak-30m/report.json` (ignored).
+
+`idle_capacity.py` opened the full 256 local-connection ceiling, a five-byte
+echo each. All 256 established; loaded RSS was 17.6 MiB (about 49.8 KiB per idle
+connection) with 522 descriptors. After closing them the client held 10
+descriptors and 16.3 MiB. The nominal relay reservation at the ceiling is about
+48 MiB; untouched pages keep measured RSS lower until a connection carries
+bulk data. This is a capacity check, not a throughput result.
+
+Five rounds of 256 MiB, one stream, with the aligned buffers:
+
+| Client | Upload MiB/s (median, range) | Download MiB/s (median, range) | Sampled RSS KiB |
+|---|---:|---:|---:|
+| Four-frame batch | 826.2 (732.3–856.4) | 576.1 (512.4–887.5) | 5468 |
+| Xray 26.10.21 | 647.7 (596.2–690.5) | 255.0 (241.1–298.6) | 31976 |
+
+The download range is bimodal because the shared host slowed in later rounds;
+the first two rounds were 862–887 MiB/s. Upload stayed near 800 MiB/s.
+
+Widening the batch traded a bounded amount of memory for rate. The same
+single-stream shape and a three-round 8 × 32 MiB shape:
+
+| Uplink batch | Single up/down MiB/s | 8-stream up/down MiB/s | RSS (8 streams) |
+|---|---:|---:|---:|
+| 4 frames (32,748 B) | 826 / 576 | 1843 / 1804 | 7.4 MiB |
+| 8 frames (65,496 B) | 978 / 717 | 2170 / 2005 | 6.9–7.7 MiB |
+| 16 frames (130,992 B) | **1056 / 902** | **2219 / 2138** | 6.8–8.1 MiB |
+| Xray 26.10.21 | 648 / 255 | 1880 / 403 | 35–36 MiB |
+
+The sixteen-frame batch is the delivered setting. It reserves about 190 KiB of
+relay buffers and about 130 KiB of session batch per connection, so the
+256-connection ceiling is about 48 MiB of relay memory; measured RSS with eight
+active streams stayed under 8.1 MiB. A thirty-two-frame batch (261,984 B) was
+also measured; it reached 1010/730 MiB/s single-stream and 2021/2035 MiB/s at
+eight streams, below the sixteen-frame result, so the wider batch was rejected.
+Wider batches show diminishing or negative returns.
+
+`latency_compare.py` runs three alternating rounds of 1000 ping-pongs and 50
+fresh connections through each client:
+
+| Metric | This client | Xray 26.10.21 |
+|---|---:|---:|
+| Ping P50 | 0.270–0.272 ms | 0.297–0.300 ms |
+| Setup P50 | 4.25–4.46 ms | 4.13–4.27 ms |
+| Setup P95 | 4.75–5.40 ms | 4.83–5.69 ms |
+| Worst setup P99 | 6.33 ms | 31.9–33.2 ms in two of three rounds |
+| Sampled RSS | 5.8–5.9 MiB | 35–42 MiB |
+| Sampled FDs | 10 | 109–211 |
+
+`bulk_stability.py` now also checks two backpressure shapes: a 16 MiB upload
+whose sink stops reading for two seconds, and a 16 MiB upload followed by a
+half-close. Both digests matched; the stall took 2.018 s and the half-close took
+25 ms. Peak RSS during the stall was 6.8 MiB, and descriptors returned to 10.
+The pinned v2.0.1 server rejects post-handshake `Handshake` records
+(`src/protocol/reality/tls13/application_io.rs:541`), so a client-initiated
+KeyUpdate cannot be sent without breaking the wire contract; the record budget
+above is therefore a deliberate protocol limit.

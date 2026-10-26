@@ -15,6 +15,6 @@ pub mod socket;
 
 pub use dial::{CONNECT_BUDGET, DNS_BUDGET, Dial, DialError, Dialed, MAX_CANDIDATES};
 pub use family::{AddressFamily, DialPolicy, Environment, FailureEvidence, Tuning};
-pub use relay::{RELAY_BUFFER, Transferred, carry, verdict};
+pub use relay::{DOWNLINK_BUFFER, RELAY_BUFFER, Transferred, carry, verdict};
 pub use session::{Downlink, VisionSession};
 pub use socket::{Applied, KEEPALIVE_COUNT, KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, configure, probe};

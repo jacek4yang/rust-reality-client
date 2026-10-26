@@ -184,7 +184,7 @@ more stable connection — they get a different failure. The names and values, a
 | `MAX_CANDIDATES` / `MAX_IN_FLIGHT` | 16 / 2 | addresses per name, dials at once |
 | `KEEPALIVE_IDLE` / `_INTERVAL` / `_COUNT` | 30 s / 10 s / 3 | the kernel probes on a node session |
 | `FIRST_BYTE_BUDGET` | 15 s | what the application waits for a tunnel |
-| `RELAY_BUFFER` / `MAX_HEAD_LEN` | 8 KiB / 8 KiB | per-direction copy, request head read |
+| `RELAY_BUFFER` / `MAX_HEAD_LEN` | 32 KiB / 8 KiB | per-direction copy, request head read |
 
 If one of these genuinely needs to change for your network, change it in the source and
 rebuild; the value you wrote in a file would have told you nothing about what it cost.
@@ -465,12 +465,16 @@ injects one of its own to make a dead session look alive.
 
 ### The hot path's fixed cost
 
-* 8 KiB per direction (`RELAY_BUFFER`, `src/transport/relay.rs:57`), allocated once
-  per connection by the copy loop and reused for every chunk. A relay holds 16 KiB
-  regardless of how much it moves.
-* A Vision session holds four buffers, each `Vec::with_capacity` at construction
-  (`src/transport/session.rs:253-257`); the three `resize` calls in the same file
-  only ever grow within that capacity.
+* 130,992 bytes uplink (`RELAY_BUFFER`) and 65,536 downlink (`DOWNLINK_BUFFER`,
+  `src/transport/relay.rs:64`), allocated once per connection by the copy loop
+  and reused for every chunk. A relay holds about 190 KiB regardless of how much
+  it moves. The uplink size is exactly sixteen frame capacities and the downlink
+  size exactly four records, so neither spills a few trailing bytes into an
+  extra, nearly empty record.
+* A Vision session holds four buffers, each allocated once at construction
+  (`src/transport/session.rs:260-269`); `outgoing` is reserved for one full
+  sixteen-record uplink batch, and the remaining `resize`/fill calls only grow
+  within those reservations or reuse the fixed incoming buffer.
 * No allocation in the Vision codec's production path, no logging in
   `relay.rs`/`session.rs`/`vision.rs`, and no timer armed per chunk. These are
   grep-checkable rather than aspirational:
@@ -479,6 +483,35 @@ injects one of its own to make a dead session look alive.
 * One task per connection on the shared multi-thread runtime, so a busy stream
   occupies a worker for a chunk rather than for a session, and there is no second
   runtime, queue or thread pool in front of it.
+* At the 256-connection ceiling, all connections established with a measured
+  loaded RSS of 17.6 MiB (about 49.8 KiB per idle connection) and 522
+  descriptors; after close, 10 descriptors remained and RSS was 16.3 MiB. The
+  reserved relay total at that ceiling is 48 MiB; untouched pages are not
+  resident until a connection carries bulk data.
+
+### Traffic-key record budget
+
+TLS 1.3 AES-GCM retires a traffic key after `2^24` records
+(`src/protocol/tls13.rs:675`). One Vision uplink frame is at most 8 KiB, so a
+single session can send about 128 GiB before the key is exhausted; a downlink
+of 16 KiB records holds about 256 GiB. A measured single-session upload reached
+137,357,164,544 bytes (127.9 GiB) in 127 s (1029 MiB/s) before the client
+reported `session traffic key exhausted`, with the process and its descriptors
+intact. A
+measured download reached 274,874,148,645 bytes (256.0 GiB) in 494 s before the
+node reset the connection: the node seals downlink records and reaches its own
+`2^24` limit first, so the client sees a transport reset rather than a local
+key-exhaustion error. Neither direction retries or migrates; open a new
+connection at the boundary.
+
+At the measured loopback ceiling this is roughly three minutes of maximum-rate
+upload or eight minutes of download, but a typical AI request/response stream is
+orders of magnitude smaller. Client-initiated TLS KeyUpdate is not implemented.
+The pinned v2.0.1 server rejects a post-handshake `Handshake` record as
+`UnexpectedContentType`
+(`src/protocol/reality/tls13/application_io.rs:541`), so sending one would break
+the wire contract this client is required to preserve. Do not use one session
+for multi-hundred-gigabyte bulk transfers and expect it to outlive that budget.
 
 ## Measuring a build: interop and soak
 
